@@ -252,6 +252,15 @@ TypeScript source for reading and runtime-only use. The sibling-module extension
 is derived from the framework's own module URL, so the same code works from
 source and from the compiled build.
 
+### Verifying the artefact
+
+Type-checking the tarball proves nothing: Deno does not type-check inside
+`node_modules`, so a `.d.ts` importing an unshipped path and a `bin` missing its
+own imports both pass silently — and both shipped in 0.0.2. `scripts/check-package.sh`
+therefore packs the tarball, installs it into a scratch copy of the example app,
+builds that app **through the package's own bin**, and serves it. It runs as
+part of `publish.sh`'s pre-flight.
+
 ## Package layout
 
 ```

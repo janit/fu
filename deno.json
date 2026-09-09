@@ -1,6 +1,6 @@
 {
   "name": "@janit/fu",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "MIT",
   "exports": {
     ".": "./src/mod.ts",
@@ -42,7 +42,8 @@
     "todo:dev": "deno run -A --node-modules-dir=manual src/cli.ts dev fu-todo",
     "todo:build": "deno run -A --node-modules-dir=manual src/cli.ts build fu-todo",
     "todo:start": "cd fu-todo && PORT=1337 deno run -A .output/server/index.mjs",
-    "test": "deno test -A --node-modules-dir=manual src/"
+    "test": "deno test -A --node-modules-dir=manual src/",
+    "check:pkg": "npm run build && ./scripts/check-package.sh"
   },
   "publish": {
     "exclude": [

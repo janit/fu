@@ -49,6 +49,7 @@ deno task todo:start   # serve its build on :1337
 
 deno task test     # 41 unit tests
 deno task check    # types + tests + jsr publish dry-run
+deno task check:pkg  # build and serve a real app from the packed npm artefact
 ```
 
 Both example apps build against **this checkout's `src/`**, never a published
