@@ -1,0 +1,65 @@
+{
+  "name": "@janit/fu",
+  "version": "0.0.1",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/mod.ts",
+    "./build": "./src/build.ts",
+    "./dev": "./src/dev.ts",
+    "./client": "./src/client.ts",
+    "./render": "./src/render.ts",
+    "./router": "./src/router.ts",
+    "./plugins": "./src/plugins.ts",
+    "./cli": "./src/cli.ts"
+  },
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "npm:preact@^11.0.0-rc.1",
+    "lib": [
+      "deno.ns",
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ]
+  },
+  "imports": {
+    "preact": "npm:preact@^11.0.0-rc.1",
+    "preact-render-to-string": "npm:preact-render-to-string@^6.7.0",
+    "@preact/signals": "npm:@preact/signals@^2.11.2",
+    "urlpattern-polyfill": "npm:urlpattern-polyfill@^10.1.0",
+    "rolldown": "npm:rolldown@^1.2.7",
+    "rolldown/experimental": "npm:rolldown@^1.2.7/experimental",
+    "lightningcss": "npm:lightningcss@^1.33.0",
+    "nitro/builder": "npm:nitro@^3.0.260903-beta/builder",
+    "crossws/server": "npm:crossws@^0.4.12/server",
+    "@types/node": "npm:@types/node@^25.9.1",
+    "@std/assert": "jsr:@std/assert@^1.0.19"
+  },
+  "tasks": {
+    "dev": "deno run -A --node-modules-dir=manual src/cli.ts dev example",
+    "build": "deno run -A --node-modules-dir=manual src/cli.ts build example",
+    "check": "deno check src/mod.ts && deno test -A --node-modules-dir=manual src/ && deno publish --dry-run --allow-dirty",
+    "todo:dev": "deno run -A --node-modules-dir=manual src/cli.ts dev fu-todo",
+    "todo:build": "deno run -A --node-modules-dir=manual src/cli.ts build fu-todo",
+    "todo:start": "cd fu-todo && PORT=1337 deno run -A .output/server/index.mjs",
+    "test": "deno test -A --node-modules-dir=manual src/"
+  },
+  "publish": {
+    "exclude": [
+      "**/*_test.ts",
+      "*.log",
+      ".claude",
+      ".fu",
+      ".output",
+      "data",
+      "dist",
+      "docs",
+      "example",
+      "fu-todo",
+      "node_modules",
+      "package-lock.json",
+      "scripts"
+    ]
+  },
+  "nodeModulesDir": "manual"
+}

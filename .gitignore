@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.output/
+.fu/
+*.log
+.claude/
+fu-todo/data/
+deno.lock

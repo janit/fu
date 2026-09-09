@@ -1,0 +1,19 @@
+/* `composes` must be a top-level rule — lightningcss rejects it inside @layer
+   or any other nested rule. */
+.button {
+  background: rebeccapurple;
+  color: white;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 0;
+  font: inherit;
+  /* native CSS nesting */
+  &:hover { background: color-mix(in srgb, rebeccapurple 80%, white); }
+}
+.badge {
+  composes: button;
+  font-weight: 700;
+}
+@layer components {
+  .button { cursor: pointer; }
+}
