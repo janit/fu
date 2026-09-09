@@ -1,6 +1,6 @@
 {
   "name": "@janit/fu",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "type": "module",
   "description": "A minimal islands framework on Preact 11, rolldown and Nitro. Runs on Deno, Node and Bun.",
   "license": "MIT",
@@ -44,7 +44,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "fu": "./dist/cli.js"
+    "fu": "dist/cli.js"
   },
   "dependencies": {
     "crossws": "^0.4.12",

@@ -7,3 +7,4 @@ dist/
 .claude/
 fu-todo/data/
 deno.lock
+.serena/

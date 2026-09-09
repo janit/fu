@@ -1,41 +1,11 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { css, hash, jsx, optional, ssrModule, walk } from "./plugins.ts";
+import { css, hash, jsx, selfAlias } from "./plugins.ts";
 import type { Plugin } from "rolldown";
 
 // The plugins expose object-form hooks; call them the way rolldown would.
-// deno-lint-ignore no-explicit-any
-const run = (p: Plugin, code: string, id: string): { code: string; map: unknown } | null =>
-  (p.transform as any).handler.call({}, code, id);
-
-const tmp = await Deno.makeTempDir();
-
-Deno.test("walk finds routes and skips framework files", async () => {
-  const root = await Deno.makeTempDir();
-  await Deno.mkdir(`${root}/routes/blog`, { recursive: true });
-  for (
-    const f of [
-      "routes/index.tsx",
-      "routes/_app.tsx",
-      "routes/_middleware.ts",
-      "routes/blog/[slug].tsx",
-      "routes/notes.md",
-    ]
-  ) await Deno.writeTextFile(`${root}/${f}`, "");
-  assertEquals(walk(root, `${root}/routes`).sort(), [
-    "/routes/blog/[slug].tsx",
-    "/routes/index.tsx",
-  ]);
-});
-
-Deno.test("walk on a missing directory returns nothing rather than throwing", () => {
-  assertEquals(walk(tmp, `${tmp}/does-not-exist`), []);
-});
-
-Deno.test("optional finds the first file that exists", async () => {
-  await Deno.writeTextFile(`${tmp}/app.ts`, "");
-  assertStringIncludes(optional(tmp, "nope.ts", "app.ts") ?? "", "app.ts");
-  assertEquals(optional(tmp, "nope.ts"), null);
-});
+type Transform = (code: string, id: string) => { code: string; map: unknown } | null;
+const run = (p: Plugin, code: string, id: string) =>
+  (p.transform as unknown as { handler: Transform }).handler.call({}, code, id);
 
 Deno.test("plain CSS becomes an empty module, and its hash tracks the content", () => {
   const sheets = new Map<string, string>();
@@ -62,7 +32,11 @@ Deno.test("composes yields every class name, not just the first", () => {
   // Dropping the composed names loses those styles silently — no error, the
   // element simply renders unstyled.
   const p = css(new Map());
-  const out = run(p, ".base { padding: 4px } .badge { composes: base; font-weight: 700 }", "/y.module.css")!;
+  const out = run(
+    p,
+    ".base { padding: 4px } .badge { composes: base; font-weight: 700 }",
+    "/y.module.css",
+  )!;
   const names = JSON.parse(out.code.match(/export default (\{.*?\});/s)![1]);
   assertEquals(names.badge.split(" ").length, 2);
   assertEquals(names.badge.includes(names.base), true);
@@ -103,7 +77,10 @@ Deno.test("island exports are stamped for the SSR renderer", () => {
 
 Deno.test("stamping only applies to islands, and only with the flag", () => {
   const src = "export default function C() { return null; }";
-  assertEquals(run(jsx({ stampIslands: true }), src, "/p/routes/a.tsx")!.code.includes("__island"), false);
+  assertEquals(
+    run(jsx({ stampIslands: true }), src, "/p/routes/a.tsx")!.code.includes("__island"),
+    false,
+  );
   assertEquals(run(jsx(), src, "/p/islands/C.tsx")!.code.includes("__island"), false);
 });
 
@@ -142,38 +119,20 @@ Deno.test("things with no runtime binding are never stamped", () => {
 });
 
 Deno.test("the hmr flag makes an island accept its own updates", () => {
-  const out = run(jsx({ hmr: true }), "export default function C() { return null; }", "/p/islands/C.tsx")!;
+  const out = run(
+    jsx({ hmr: true }),
+    "export default function C() { return null; }",
+    "/p/islands/C.tsx",
+  )!;
   assertStringIncludes(out.code, "import.meta.hot.accept");
   assertStringIncludes(out.code, "__fu_hmr__");
 });
 
-Deno.test("ssrModule wires the optional app and shell only when present", () => {
-  const bare = ssrModule({
-    renderPath: "/fu/render.ts",
-    routeFiles: ["/routes/index.tsx"],
-    root: "/p",
-    assets: "{ js: [], css: [] }",
-  });
-  assertStringIncludes(bare, "app: undefined");
-  assertStringIncludes(bare, "Shell: undefined");
-  assertStringIncludes(bare, '"/routes/index.tsx": () => import("/p/routes/index.tsx")');
-
-  const full = ssrModule({
-    renderPath: "/fu/render.ts",
-    routeFiles: [],
-    root: "/p",
-    assets: "{}",
-    appPath: "/p/app.ts",
-    shellPath: "/p/routes/_app.tsx",
-  });
-  assertStringIncludes(full, 'import app from "/p/app.ts"');
-  assertStringIncludes(full, 'import Shell from "/p/routes/_app.tsx"');
-});
-
-Deno.test("ssrModule unwraps the Request from nitro's H3Event", () => {
-  // Nitro invokes the handler with an H3Event, which exposes url/headers but
-  // has no json()/text()/formData(). Without the unwrap every body read fails.
-  const out = ssrModule({ renderPath: "/r.ts", routeFiles: [], root: "/p", assets: "{}" });
-  assertStringIncludes(out, "input instanceof Request");
-  assertStringIncludes(out, "input?.req");
+Deno.test("selfAlias maps the package name and its subpaths onto the runtime dir", () => {
+  const p = selfAlias("@janit/fu", "/fw/src", ".ts");
+  const resolve = (p.resolveId as (id: string) => string | null).bind({});
+  assertEquals(resolve("@janit/fu"), "/fw/src/mod.ts");
+  assertEquals(resolve("@janit/fu/errors"), "/fw/src/errors.ts");
+  assertEquals(resolve("@janit/fu-other"), null);
+  assertEquals(resolve("preact"), null);
 });

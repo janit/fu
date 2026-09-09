@@ -41,20 +41,31 @@ function proxyFor(key: string, impl: FunctionComponent<Props>): IslandProxy {
   return entry;
 }
 
-/** Hydrate every `[data-island]` marker the server rendered. */
+/**
+ * Hydrate every `[data-island]` marker the server rendered.
+ *
+ * Every distinct island module is fetched at once, then the markers are
+ * hydrated in document order; awaiting each in turn would serialise one
+ * network round-trip per island.
+ */
 export async function hydrateIslands(
   manifest: Record<string, () => Promise<{ default: FunctionComponent<Props> }>>,
 ): Promise<void> {
-  for (const el of document.querySelectorAll<HTMLElement>("[data-island]")) {
+  const els = [...document.querySelectorAll<HTMLElement>("[data-island]")];
+  const keys = [...new Set(els.map((el) => el.dataset.island!))];
+  const loaded = new Map(
+    await Promise.all(keys.map(async (key) => {
+      const loader = manifest[key];
+      if (!loader) console.warn("[fu] no island module for", key);
+      return [key, loader ? (await loader()).default : null] as const;
+    })),
+  );
+  for (const el of els) {
     const key = el.dataset.island!;
-    const loader = manifest[key];
-    if (!loader) {
-      console.warn("[fu] no island module for", key);
-      continue;
-    }
-    const mod = await loader();
+    const impl = loaded.get(key);
+    if (!impl) continue;
     const props = JSON.parse(el.dataset.props || "{}") as Props;
-    hydrate(h(proxyFor(key, mod.default).Component, props), el);
+    hydrate(h(proxyFor(key, impl).Component, props), el);
     const list = mounted.get(key) ?? [];
     list.push({ el, props });
     mounted.set(key, list);

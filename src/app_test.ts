@@ -119,8 +119,8 @@ Deno.test("App.use records order and chains", () => {
   assertEquals(app.middleware[0], a);
 });
 
-Deno.test("an App with no middleware still reaches the handler", async () => {
-  const run = new App<S>().compose(() => new Response("ok"));
+Deno.test("an empty chain still reaches the handler", async () => {
+  const run = compose<S>(new App<S>().middleware, () => new Response("ok"));
   assertEquals(await (await run(ctx())).text(), "ok");
 });
 

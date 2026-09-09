@@ -1,7 +1,7 @@
 # Fresh Urquell — design
 
-**Date:** 2026-09-09
-**Status:** approved for skeleton build
+**Date:** 2026-09-09 (design), updated the same evening after the first cleanup pass
+**Status:** implemented and verified; a living document
 **Package:** `@janit/fu` (repo `janit/fu`)
 
 A minimal islands framework: file-system routing, SSR and hydration on
@@ -94,10 +94,29 @@ File-path mapping:
 
 Routes sort static → dynamic → wildcard, then by depth.
 
+`URLPattern.exec` is not cheap: ~3.5 µs per route on Deno, so a 16-route app
+spent 30–60 µs routing every request, more than the Preact render of a small
+page. Two facts fix that without leaving the standard. The `{ pathname }`
+dictionary input is five times slower than a URL string on Deno, so the router
+passes `"http://x" + pathname`. And `exec` only needs to run where it can
+match: a route with no pattern syntax at all is matched by string equality
+against `urlPattern.pathname` (the canonical, percent-encoded form, so
+`routes/über.tsx` still matches `/%C3%BCber`), and a pattern whose segment
+count cannot fit the path is skipped. Measured with 16 routes: a static hit
+went from 28 µs to 65 ns, a dynamic hit from 57 µs to 1.6 µs, a miss from
+58 µs to 1.1 µs. URLPattern still decides every non-literal match.
+
+The renderer caches each route's loaded module on the route; a dynamic import
+of an already-loaded module is cheap but not free, and the manifest cannot
+change within one server process (dev rebuilds the whole server on a route
+edit).
+
 **Islands.** An SSR-only transform stamps each island export with its module id.
 At render time a Preact `options.vnode` hook spots the stamp and wraps the
 component in a marker element carrying JSON-serialized props. The client walks
-`[data-island]`, imports the module and hydrates.
+`[data-island]`, imports every distinct island module at once, then hydrates
+the markers in document order — awaiting each in turn would serialise one
+network round-trip per island.
 
 The stamp is placed using oxc's parser, not a regex. `export const X = () => {}`
 is the most natural way to write a Preact component and a regex over `export
@@ -228,6 +247,19 @@ Each of these cost real debugging and none is documented upstream:
    the dev runner; wrong order gives `Runner did not become ready in time`.
 9. crossws: returning a plain `{crossws}` object fails on Deno. Use inline
    `websocket` hooks, which behave uniformly across runtimes.
+10. **Node package self-reference.** An app in this repo imports the framework
+    by name, and Node resolves that by walking up to the root `package.json`
+    and honouring its `exports` — the compiled `dist/`. Every app bundle then
+    carried two copies of the core, one stale, and nitro's dev worker died on
+    the externalised `dist/mod.js` (`Loading unprepared module`). The dev
+    server had been broken from the moment the npm package landed, and nothing
+    in the check task noticed. The drivers now alias the framework's own
+    package name (read from the `package.json` above the runtime modules) to
+    the copy they are running from; both apps build with `dist/` deleted. For
+    a real consumer the alias resolves to the installed package, i.e. a no-op.
+11. Nitro hard-codes `node_modules/.nitro` under `rootDir` for its well-known
+    files regardless of `buildDir`, so every app directory grows a
+    `node_modules/`. Harmless under the Deno workspace; do not fight it.
 
 ## Distribution
 
@@ -252,35 +284,62 @@ TypeScript source for reading and runtime-only use. The sibling-module extension
 is derived from the framework's own module URL, so the same code works from
 source and from the compiled build.
 
+Inside this repo the compiled `dist/` is a hazard rather than a product: see
+trap 10. The apps must build against `src/`, and the drivers' self-alias is
+what guarantees it. `deno check` sees the same mapping because `example/` and
+`fu-todo/` are Deno workspace members whose import map points
+`@janit/fu` at `../src/mod.ts`; `deno task check` type-checks both
+apps, which is how `ShellProps.children: unknown` (rejected by Preact's JSX)
+and `node:sqlite`'s `number | bigint` row counts were caught.
+
 ### Verifying the artefact
 
 Type-checking the tarball proves nothing: Deno does not type-check inside
 `node_modules`, so a `.d.ts` importing an unshipped path and a `bin` missing its
 own imports both pass silently — and both shipped in 0.0.2. `scripts/check-package.sh`
 therefore packs the tarball, installs it into a scratch copy of the example app,
-builds that app **through the package's own bin**, and serves it. It runs as
-part of `publish.sh`'s pre-flight.
+builds that app **through the package's own bin**, serves it, and then runs
+the dev server from the package as well — a build proves nothing about dev,
+and the monorepo dev server was broken for a day by a resolution problem
+(trap 10) that no build step could show. It runs as part of `publish.sh`'s
+pre-flight.
+
+The script refuses to start if any of its ports is already taken. A server
+left behind by an earlier run would answer the probes and let a broken
+artefact pass, and that had happened: the servers used to be started in
+subshells, so the cleanup killed the subshell and orphaned the server. They
+now run under `setsid` and the cleanup kills the process group, with SIGKILL
+as the fallback since the dev server ignores SIGTERM.
 
 ## Package layout
 
 ```
-deno.json          @janit/fu, exports map, npm: imports
+deno.json          @janit/fu, exports map, npm: imports, workspace, fmt/lint
 src/
   mod.ts           core public exports
   types.ts         shared types
-  router.ts        URLPattern routing
-  render.ts        SSR, island boundaries
+  app.ts           middleware chain (App, compose)
+  errors.ts        HttpError, status text, error normalisation
+  router.ts        URLPattern routing with the literal/segment fast path
+  render.ts        SSR, island boundaries, error pages, document assembly
   client.ts        hydration + HMR re-render
   hmr-runtime.js   client HMR runtime (rolldown `implement` source)
-  plugins.ts       shared rolldown plugins: jsx, css, virtual
+  plugins.ts       rolldown plugins only: jsx, css, selfAlias, virtual
+  driver.ts        glue both drivers share: runtime paths, project scan,
+                   rolldown/nitro option sets, generated entries
   build.ts         production driver
   dev.ts           dev driver
   cli.ts           `fu dev` / `fu build`
-example/           runnable app exercising every feature
+example/           runnable app exercising every feature (workspace member)
+fu-todo/           complete app with SQLite and a JSON API (workspace member,
+                   published separately as janit/fu-todo)
 ```
 
-`build.ts` and `dev.ts` share `plugins.ts`; the probe duplicated these and must
-not.
+`build.ts` and `dev.ts` are each a page: everything they would otherwise
+duplicate lives in `driver.ts`. `plugins.ts` knows nothing about projects.
+`deno task check` runs `deno fmt --check`, `deno lint`, type checks of the
+framework and both apps, the tests and a JSR dry-run; `deno task check:pkg`
+packs and exercises the npm artefact.
 
 JSR enforces "no slow types": every exported function needs an explicit return
 type. This cost exactly one annotation in the probe. Publishing is optional —
@@ -299,15 +358,23 @@ public usage"; instability here is accepted deliberately.
 Production build on Deno and Node; one `node-server` artifact serving on Node,
 Bun and Deno; dev server with island HMR, CSS HMR and route rebuild; hydration
 in dev and prod; CSS Modules with `composes`; wildcard routing; `deno publish
---dry-run` clean.
+--dry-run` clean; the npm artefact building and serving an app through its
+own bin.
+
+The HMR claims are checked in a real browser, not inferred: headless Chromium
+(Playwright) loads the prod build and clicks all three islands, then loads the
+dev server, clicks the counter twice, edits the island source and sees the new
+markup with the count intact, then edits the CSS and sees the computed style
+change without a navigation. That harness lives outside the repo for now.
 
 Not yet built: sourcemaps in dev, an error overlay, prerendering, per-route CSS
-splitting, oxc-based island detection.
+splitting.
 
 ## Wasm
 
-Nothing in the framework's own compute justifies wasm — route matching is 2% of
-request time and the remaining 98% is Preact SSR calling user JS. The bundler,
+Nothing in the framework's own compute justifies wasm — route matching was 2%
+of request time before the fast path and is negligible after it; the rest is
+Preact SSR calling user JS. The bundler,
 JSX transform and CSS engine are already Rust.
 
 Wasm is the right tool for *bolted-on capability* instead: it is the only binary

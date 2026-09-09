@@ -7,11 +7,7 @@ const TABLE: Record<string, [string, number]> = {
   "/blog": ["/blog/hello-world", 302],
 };
 
-/**
- * Short-circuit redirects. This is the shape routemap4's redirect middleware
- * needs from the framework: read state, read the URL, return a Response.
- * Everything else there is caching around the lookup table.
- */
+/** Short-circuit redirects: read the URL, return a Response. */
 export const redirects: Middleware<State> = (ctx) => {
   const hit = TABLE[ctx.url.pathname];
   if (!hit) return ctx.next();

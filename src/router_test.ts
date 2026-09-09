@@ -53,3 +53,16 @@ Deno.test("a dynamic segment does not swallow extra path segments", () => {
   const routes = buildRoutes({ "/routes/blog/[slug].tsx": mod });
   assertEquals(match(routes, "/blog/a/b"), null);
 });
+
+Deno.test("a static route with non-ASCII characters matches its encoded request path", () => {
+  // Literal routes are matched by string equality against the pattern's
+  // canonical pathname, which is what a URL's pathname carries.
+  const routes = buildRoutes({ "/routes/über.tsx": mod, "/routes/[slug].tsx": mod });
+  assertEquals(match(routes, "/%C3%BCber")?.route.pattern, "/über");
+});
+
+Deno.test("a wildcard also matches its own base path", () => {
+  const routes = buildRoutes({ "/routes/files/[...rest].tsx": mod });
+  assertEquals(match(routes, "/files")?.route.pattern, "/files/:rest*");
+  assertEquals(match(routes, "/file"), null);
+});

@@ -8,9 +8,10 @@ No Vite, no Babel, no esbuild. The bundler, JSX transform and CSS engine are
 all Rust.
 
 ```
-core     ~300 lines   router + render + client + hmr runtime
-drivers  ~400 lines   build + dev + shared rolldown plugins
+core     ~560 lines   router + render + client + hmr runtime
+drivers  ~490 lines   build + dev + shared driver glue + rolldown plugins
 ```
+(code lines, comments and blanks excluded)
 
 ## What this is
 
@@ -47,15 +48,19 @@ deno task todo:dev     # the fu-todo example app
 deno task todo:build
 deno task todo:start   # serve its build on :1337
 
-deno task test     # 41 unit tests
-deno task check    # types + tests + jsr publish dry-run
-deno task check:pkg  # build and serve a real app from the packed npm artefact
+deno task test     # 59 unit tests
+deno task check    # format, lint, types (framework and both apps), tests, jsr dry-run
+deno task check:pkg  # build, serve and dev-serve a real app from the packed npm artefact
 ```
 
 Both example apps build against **this checkout's `src/`**, never a published
 package, so the framework and the apps can be changed and tested together
-before anything is released. `npm install` at the root is the only setup step;
-it serves the whole repo.
+before anything is released. The drivers make that hold: they alias the
+framework's own package name to the runtime copy they are running from, so an
+app's `import { App } from "@janit/fu"` cannot drift to a stale
+`dist/` through Node's package self-reference. The apps are Deno workspace
+members, so `deno check` sees the same mapping. `npm install` at the root is
+the only setup step; it serves the whole repo.
 
 Then run the build on whichever runtime you like — one artifact, three runtimes:
 
@@ -232,9 +237,17 @@ type RouteManifest = Record<string, () => Promise<RouteModule>>;
 type Assets = { js: { href: string }[]; css: { href: string }[] };
 ```
 
-Everything bundler-specific lives in the drivers (`src/build.ts`, `src/dev.ts`)
-and the shared plugins (`src/plugins.ts`). The same core ran unchanged under a
-Vite driver during prototyping, so swapping the build layer stays cheap.
+Everything bundler-specific lives in the drivers (`src/build.ts`, `src/dev.ts`),
+the glue they share (`src/driver.ts`: locating the runtime modules, scanning a
+project, the rolldown and nitro option sets) and the rolldown plugins
+(`src/plugins.ts`). The same core ran unchanged under a Vite driver during
+prototyping, so swapping the build layer stays cheap.
+
+Routing is on `URLPattern`, but `exec` costs microseconds per route on Deno,
+so it only runs when it can matter: a route with no pattern syntax is matched
+by string equality against its canonical pathname, and a pattern whose
+segment count cannot fit the path is skipped. A static hit is ~65 ns and a
+dynamic one ~1.6 µs with 16 routes, down from 28 µs and 57 µs.
 
 See [the design doc](docs/design.md) for
 the full rationale and the nine undocumented traps this implementation encodes.
@@ -250,11 +263,12 @@ failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |
 |---|---|
-| router | static beats dynamic beats wildcard; wildcards span segments; params decode |
+| router | static beats dynamic beats wildcard; wildcards span segments and match their own base path; params decode; a non-ASCII static route matches its percent-encoded request |
 | middleware | outer unwinds last and decorates inner short-circuits; `next()` twice rejects; throws propagate |
 | render | head escaping; JSON-LD cannot close its own `<script>`; 404 vs 405; islands get a marker |
 | errors | a 500 never leaks its message; error responses are uncacheable; a broken error page falls back |
-| plugins | `composes` keeps every class name; CSS output changes with content; the JSX transform never touches rolldown's runtime; the H3Event unwrap |
+| plugins | `composes` keeps every class name; CSS output changes with content; the JSX transform never touches rolldown's runtime; the package self-alias |
+| driver | the server entry imports only the optional files that exist; the H3Event unwrap |
 
 Two of these were found by writing the suite, not before it: `ctx.next()` called
 twice resumed at the wrong depth, and a middleware throwing synchronously
@@ -274,8 +288,11 @@ private history leaks:
 the privacy boundary, a staged-tree backstop that refuses the push if anything
 private reaches the index anyway, semver tagging derived from the public repo's
 existing tags, and version stamping so the git tag and `deno.json` cannot drift.
-`fu-todo/` is stripped from `janit/fu`; the framework specifier is rewritten
-from `../src/mod.ts` on the way into `janit/fu-todo`.
+`fu-todo/` is stripped from `janit/fu`, and from its Deno workspace; the
+framework specifier is rewritten from `../src/mod.ts` on the way into
+`janit/fu-todo`, which also gets its own `nodeModulesDir` since it is no
+longer a workspace member there. Both flows can be rehearsed against a local
+bare repository by overriding `PUBLIC_REPO`.
 
 ## Known gaps
 

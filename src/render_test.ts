@@ -128,7 +128,12 @@ Deno.test("the shell wraps the page and can read state", async () => {
     assets,
     initialState: () => ({ tenant: "acme" }),
     Shell: ({ ctx, children }) =>
-      h("div", { id: "shell" }, h("span", null, (ctx.state as { tenant: string }).tenant), children),
+      h(
+        "div",
+        { id: "shell" },
+        h("span", null, (ctx.state as { tenant: string }).tenant),
+        children,
+      ),
   });
   const html = await (await get(handler, "/")).text();
   assertStringIncludes(html, '<div id="shell">');
@@ -140,7 +145,9 @@ Deno.test("islands are wrapped in a hydration marker carrying their props", asyn
   const Island = (props: { n: number }) => h("b", null, String(props.n));
   (Island as unknown as { __island: string }).__island = "/islands/X.tsx";
   const handler = createHandler({
-    manifest: { "/routes/index.tsx": () => Promise.resolve({ default: () => h(Island, { n: 7 }) }) },
+    manifest: {
+      "/routes/index.tsx": () => Promise.resolve({ default: () => h(Island, { n: 7 }) }),
+    },
     assets,
   });
   const html = await (await get(handler, "/")).text();
@@ -181,12 +188,14 @@ Deno.test("without an error page, failures are plain text and uncacheable", asyn
 
 Deno.test("the error page renders for 404, 405, thrown HttpError and a bare throw", async () => {
   const handler = createHandler({ manifest: failing, assets, ErrorPage });
-  for (const [path, method, status, body] of [
-    ["/nothing", "GET", 404, "404: Not Found"],
-    ["/api", "GET", 405, "405: Method Not Allowed"],
-    ["/forbidden", "GET", 403, "403: Not yours"],
-    ["/boom", "GET", 500, "500: Internal Server Error"],
-  ] as const) {
+  for (
+    const [path, method, status, body] of [
+      ["/nothing", "GET", 404, "404: Not Found"],
+      ["/api", "GET", 405, "405: Method Not Allowed"],
+      ["/forbidden", "GET", 403, "403: Not yours"],
+      ["/boom", "GET", 500, "500: Internal Server Error"],
+    ] as const
+  ) {
     const res = await get(handler, path, method);
     assertEquals(res.status, status);
     assertEquals(res.headers.get("content-type"), "text/html; charset=utf-8");

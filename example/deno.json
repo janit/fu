@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "npm:preact@^11.0.0-rc.1",
+    "lib": [
+      "deno.ns",
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ]
+  },
+  "imports": {
+    "@janit/fu": "../src/mod.ts",
+    "preact": "npm:preact@^11.0.0-rc.1",
+    "@preact/signals": "npm:@preact/signals@^2.11.2"
+  }
+}

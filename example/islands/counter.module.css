@@ -8,12 +8,16 @@
   border: 0;
   font: inherit;
   /* native CSS nesting */
-  &:hover { background: color-mix(in srgb, rebeccapurple 80%, white); }
+  &:hover {
+    background: color-mix(in srgb, rebeccapurple 80%, white);
+  }
 }
 .badge {
   composes: button;
   font-weight: 700;
 }
 @layer components {
-  .button { cursor: pointer; }
+  .button {
+    cursor: pointer;
+  }
 }

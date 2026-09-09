@@ -82,11 +82,4 @@ export class App<S = Record<string, unknown>> {
   get middleware(): readonly Middleware<S>[] {
     return this.#middleware;
   }
-
-  /** Wrap a terminal handler in this app's chain. */
-  compose(
-    terminal: (ctx: Ctx<S>) => Response | Promise<Response>,
-  ): (ctx: Ctx<S>) => Promise<Response> {
-    return compose(this.#middleware, terminal);
-  }
 }

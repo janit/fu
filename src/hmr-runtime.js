@@ -4,7 +4,7 @@
 // swap the module, re-run its factory, then fire its accept callbacks.
 
 /** @type {any} */
-var BaseDevRuntime = DevRuntime;
+const BaseDevRuntime = DevRuntime;
 
 class ModuleHotContext {
   /** @type {{ deps: string[], fn: (mod: any) => void }[]} */
@@ -17,11 +17,11 @@ class ModuleHotContext {
     if (args.length === 1) {
       this.acceptCallbacks.push({ deps: [this.moduleId], fn: args[0] });
     } else if (args.length !== 0) {
-      throw new Error('Invalid arguments for `import.meta.hot.accept`');
+      throw new Error("Invalid arguments for `import.meta.hot.accept`");
     }
   }
   invalidate() {
-    socket.send(JSON.stringify({ type: 'hmr:invalidate', moduleId: this.moduleId }));
+    socket.send(JSON.stringify({ type: "hmr:invalidate", moduleId: this.moduleId }));
   }
 }
 
@@ -36,8 +36,8 @@ class FuDevRuntime extends BaseDevRuntime {
 }
 
 const clientId = crypto.randomUUID();
-const addr = new URL('ws://$ADDR');
-addr.searchParams.set('clientId', clientId);
+const addr = new URL("ws://$ADDR");
+addr.searchParams.set("clientId", clientId);
 const socket = new WebSocket(addr);
 
 /** @type {any} */
@@ -54,21 +54,21 @@ async function applyPatch(url, allChangedIds) {
   const rt = globalThis.__rolldown_runtime__;
   // Stylesheets are swapped via the <link>, so they never need to accept and
   // must not drag the page into a full reload.
-  const changedIds = (allChangedIds || []).filter((id) => !id.endsWith('.css'));
+  const changedIds = (allChangedIds || []).filter((id) => !id.endsWith(".css"));
   const selfAccepting = changedIds.filter((id) => {
     const ctx = rt.moduleHotContexts.get(id);
     return ctx && ctx.acceptCallbacks.length > 0;
   });
   try {
-    await import(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now());
+    await import(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now());
   } catch (err) {
-    console.error('[hmr] failed to load patch', url, err);
+    console.error("[hmr] failed to load patch", url, err);
     location.reload();
     return;
   }
   if (!changedIds || changedIds.length === 0) return;
   if (selfAccepting.length !== changedIds.length) {
-    console.debug('[hmr] some modules did not accept; reloading');
+    console.debug("[hmr] some modules did not accept; reloading");
     location.reload();
     return;
   }
@@ -79,7 +79,7 @@ async function applyPatch(url, allChangedIds) {
     const ctx = rt.moduleHotContexts.get(id);
     for (const { fn } of ctx ? ctx.acceptCallbacks : []) fn(exports);
   }
-  console.debug('[hmr] applied', selfAccepting.join(', '));
+  console.debug("[hmr] applied", selfAccepting.join(", "));
 }
 
 /**
@@ -90,23 +90,25 @@ async function applyPatch(url, allChangedIds) {
 function swapStylesheet(href) {
   const links = [...document.querySelectorAll('link[rel="stylesheet"]')];
   const old = links[links.length - 1];
-  const next = document.createElement('link');
-  next.rel = 'stylesheet';
+  const next = document.createElement("link");
+  next.rel = "stylesheet";
   next.href = href;
-  next.onload = () => { if (old && old !== next) old.remove(); };
+  next.onload = () => {
+    if (old && old !== next) old.remove();
+  };
   (old ? old.parentNode : document.head).insertBefore(next, old ? old.nextSibling : null);
-  console.debug('[hmr] css swapped ->', href);
+  console.debug("[hmr] css swapped ->", href);
 }
 
 socket.onmessage = function (event) {
   const data = JSON.parse(event.data);
-  if (data.type === 'connected') {
-    console.debug('[hmr] connected');
-  } else if (data.type === 'hmr:update') {
+  if (data.type === "connected") {
+    console.debug("[hmr] connected");
+  } else if (data.type === "hmr:update") {
     applyPatch(data.url, data.changedIds);
-  } else if (data.type === 'fu:css') {
+  } else if (data.type === "fu:css") {
     swapStylesheet(data.href);
-  } else if (data.type === 'hmr:reload') {
+  } else if (data.type === "hmr:reload") {
     location.reload();
   }
 };

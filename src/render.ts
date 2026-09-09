@@ -1,7 +1,7 @@
-import { type ComponentType, h, options, type VNode } from "preact";
+import { type ComponentChildren, type ComponentType, h, options, type VNode } from "preact";
 import { renderToStringAsync } from "preact-render-to-string";
 import { buildRoutes, match, type Route } from "./router.ts";
-import type { App } from "./app.ts";
+import { type App, compose } from "./app.ts";
 import type { Assets, Ctx, Head, RouteManifest } from "./types.ts";
 import { HttpError, statusText, toRouteError } from "./errors.ts";
 
@@ -29,8 +29,9 @@ function installIslandHook(): void {
       let w = wrapped.get(type);
       if (!w) {
         const key = type[ISLAND];
-        const Inner = ((props: never) =>
-          (type as (p: never) => unknown)(props)) as ComponentType<never>;
+        const Inner = ((props: never) => (type as (p: never) => unknown)(props)) as ComponentType<
+          never
+        >;
         w = ((props: Record<string, unknown>) =>
           h("div", {
             "data-island": key,
@@ -47,7 +48,7 @@ function installIslandHook(): void {
 /** Optional root wrapper (`routes/_app.tsx`) around every page. */
 export interface ShellProps<S = Record<string, unknown>> {
   ctx: Ctx<S>;
-  children: unknown;
+  children: ComponentChildren;
 }
 
 export interface HandlerParts<S> {
@@ -76,8 +77,7 @@ export function createHandler<S = Record<string, unknown>>(
 ): (req: Request) => Promise<Response> {
   installIslandHook();
   const routes = buildRoutes(parts.manifest);
-  const terminal = (ctx: Ctx<S>) => renderRoute(ctx, routes, parts);
-  const run = parts.app ? parts.app.compose(terminal) : composeBare(terminal);
+  const run = compose(parts.app?.middleware ?? [], (ctx) => renderRoute(ctx, routes, parts));
 
   return (req: Request): Promise<Response> => {
     const ctx: Ctx<S> = {
@@ -94,12 +94,6 @@ export function createHandler<S = Record<string, unknown>>(
   };
 }
 
-function composeBare<S>(
-  terminal: (ctx: Ctx<S>) => Response | Promise<Response>,
-): (ctx: Ctx<S>) => Promise<Response> {
-  return (ctx) => Promise.resolve(terminal(ctx));
-}
-
 async function renderRoute<S>(
   ctx: Ctx<S>,
   routes: Route<S>[],
@@ -110,7 +104,9 @@ async function renderRoute<S>(
     if (!m) throw new HttpError(404);
     ctx.params = m.params;
 
-    const mod = await m.route.load();
+    // Cached on the route: a dynamic import of a loaded module is cheap but
+    // not free, and the manifest never changes within one server process.
+    const mod = m.route.module ??= await m.route.load();
     if (mod.handlers) {
       const fn = mod.handlers[ctx.req.method];
       if (!fn) throw new HttpError(405);
@@ -133,9 +129,7 @@ async function renderTree<S>(
   page: VNode,
   parts: HandlerParts<S>,
 ): Promise<string> {
-  const tree = parts.Shell
-    ? h(parts.Shell as never, { ctx, children: page } as never)
-    : page;
+  const tree = parts.Shell ? h(parts.Shell as never, { ctx, children: page } as never) : page;
   return await renderToStringAsync(tree);
 }
 

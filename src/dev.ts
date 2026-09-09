@@ -5,72 +5,43 @@ import { serve } from "crossws/server";
 import { build as nitroBuild, createDevServer, createNitro, prepare } from "nitro/builder";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { bootModule, css, jsx, optional, ssrModule, virtual, walk } from "./plugins.ts";
+import {
+  clientInput,
+  emptyDir,
+  nitroOptions,
+  runtime,
+  scanProject,
+  writeSheets,
+  writeSsrEntry,
+} from "./driver.ts";
 import type { FuOptions } from "./types.ts";
 
-/**
- * Directory holding the framework's own runtime modules, whose paths are handed
- * to rolldown. `import.meta.dirname` is undefined when this module is loaded
- * from a remote URL, and a bundler cannot fetch `https:` modules anyway — so
- * fail with the reason rather than a TypeError three frames later.
- */
-const HERE = import.meta.dirname ?? remoteFrameworkError();
-
-/**
- * Extension of the framework's own runtime modules: `.ts` when running from
- * source (this repo, or JSR), `.js` when running from the compiled npm build.
- */
-const EXT = import.meta.url.endsWith(".js") ? ".js" : ".ts";
-
-function remoteFrameworkError(): never {
-  throw new Error(
-    "fu: the framework is loaded from a remote URL (" + import.meta.url + "), " +
-      "so its runtime modules cannot be handed to the bundler. Install it " +
-      "instead — `npm:@janit/fu` in a Deno import map, or `npm i @janit/fu` — " +
-      "so it resolves to a real directory.",
-  );
-}
-
 export async function dev(opts: FuOptions): Promise<void> {
-  const root = path.resolve(opts.root);
+  const project = scanProject(opts.root);
+  const { clientDir } = project;
   const port = opts.port ?? 1337;
   // Bind all interfaces so the dev server is reachable from other machines
   // and from inside containers, not just loopback.
   const hostname = opts.hostname ?? "0.0.0.0";
   const hmrPort = port + 1;
-  const clientDir = path.join(root, "dist/client");
-  const genDir = path.join(root, ".fu");
 
-  const routeFiles = walk(root, path.join(root, "routes"));
-  const islandFiles = walk(root, path.join(root, "islands"));
-
-  fs.rmSync(clientDir, { recursive: true, force: true });
-  fs.mkdirSync(clientDir, { recursive: true });
-
+  emptyDir(clientDir);
   const sheets = new Map<string, string>();
   const peers = new Map<string, { send(data: string): void }>();
   let cssVersion = 0;
-
-  const writeSheets = () => {
-    if (sheets.size) fs.writeFileSync(path.join(clientDir, "style.css"), [...sheets.values()].join("\n"));
-  };
+  const flushCss = () => writeSheets(clientDir, sheets, "style.css");
 
   // `implement` takes the runtime SOURCE, not a path — a path gets inlined
   // literally and parsed as a regex. `$ADDR` is only substituted in rolldown's
   // own default runtime, so do it here.
-  const hmrRuntime = fs.readFileSync(path.join(HERE, "hmr-runtime.js"), "utf8")
-    .replaceAll("$ADDR", `localhost:${hmrPort}`);
+  const hmrRuntime = fs.readFileSync(runtime.hmr, "utf8").replaceAll(
+    "$ADDR",
+    `localhost:${hmrPort}`,
+  );
 
   const engine = await DevEngine.create(
     {
-      input: { boot: "fu:boot" },
-      plugins: [
-        virtual({ "fu:boot": bootModule(path.join(HERE, `client${EXT}`), islandFiles, root) }),
-        css(sheets),
-        jsx({ hmr: true }),
-      ],
-      platform: "browser",
-      moduleTypes: { ".css": "js" },
+      ...clientInput(project, sheets, true),
       experimental: { devMode: { host: "localhost", port: hmrPort, implement: hmrRuntime } },
     } as Parameters<typeof DevEngine.create>[0],
     { dir: clientDir, format: "esm", entryFileNames: "[name].js", chunkFileNames: "[name].js" },
@@ -78,11 +49,11 @@ export async function dev(opts: FuOptions): Promise<void> {
       watch: { enabled: true },
       onOutput(o) {
         if (o instanceof Error) return console.error("[fu] client build failed:", o.message);
-        writeSheets();
+        flushCss();
       },
       onHmrUpdates(r) {
         if (r instanceof Error) return console.error("[fu] hmr error:", r.message);
-        writeSheets();
+        flushCss();
         for (const { clientId, update } of r.updates) {
           const peer = peers.get(clientId);
           if (!peer || update.type === "Noop") continue;
@@ -116,58 +87,40 @@ export async function dev(opts: FuOptions): Promise<void> {
   const clientIdOf = (peer: { request?: { url?: string } }): string | null => {
     const raw = peer?.request?.url;
     if (!raw) return null;
-    try { return new URL(raw, "http://localhost").searchParams.get("clientId"); } catch { return null; }
+    try {
+      return new URL(raw, "http://localhost").searchParams.get("clientId");
+    } catch {
+      return null;
+    }
   };
-  serve({
-    port: hmrPort,
-    fetch: () => new Response("fu hmr"),
-    websocket: {
-      async open(peer) {
-        const id = clientIdOf(peer as never);
-        if (!id) return;
-        peers.set(id, peer as never);
-        await engine.registerClient(id);
-        (peer as never as { send(d: string): void }).send(JSON.stringify({ type: "connected" }));
+  serve(
+    {
+      port: hmrPort,
+      fetch: () => new Response("fu hmr"),
+      websocket: {
+        async open(peer) {
+          const id = clientIdOf(peer as never);
+          if (!id) return;
+          peers.set(id, peer as never);
+          await engine.registerClient(id);
+          (peer as never as { send(d: string): void }).send(JSON.stringify({ type: "connected" }));
+        },
+        async close(peer) {
+          const id = clientIdOf(peer as never);
+          if (!id) return;
+          peers.delete(id);
+          await engine.removeClient(id);
+        },
       },
-      async close(peer) {
-        const id = clientIdOf(peer as never);
-        if (!id) return;
-        peers.delete(id);
-        await engine.removeClient(id);
-      },
-    },
-  } as Parameters<typeof serve>[0]);
-
-  // SSR.
-  fs.rmSync(genDir, { recursive: true, force: true });
-  fs.mkdirSync(genDir, { recursive: true });
-  const ssrEntry = path.join(genDir, "ssr.ts");
-  const assets = `{ js: [{ href: "/boot.js" }], css: [{ href: "/style.css" }] }`;
-  fs.writeFileSync(
-    ssrEntry,
-    ssrModule({
-      renderPath: path.join(HERE, `render${EXT}`),
-      routeFiles,
-      root,
-      assets,
-      appPath: optional(root, "app.ts", "app.tsx"),
-      shellPath: optional(root, "routes/_app.tsx"),
-      errorPath: optional(root, "routes/_error.tsx"),
-    }),
+    } as Parameters<typeof serve>[0],
   );
 
-  const nitro = await createNitro({
-    dev: true,
-    rootDir: root,
-    serverDir: genDir,
-    scanDirs: [],
-    publicAssets: [{ dir: clientDir, baseURL: "/" }],
-    handlers: [{ route: "/**", handler: ssrEntry, format: "web", lazy: false }],
-    rollupConfig: {
-      plugins: [css(new Map()), jsx({ stampIslands: true })],
-      moduleTypes: { ".css": "js" },
-    },
-  } as Parameters<typeof createNitro>[0]);
+  // SSR.
+  const ssrEntry = writeSsrEntry(project, {
+    js: [{ href: "/boot.js" }],
+    css: [{ href: "/style.css" }],
+  });
+  const nitro = await createNitro({ ...nitroOptions(project, ssrEntry), dev: true });
   const server = createDevServer(nitro);
   server.listen({ port, hostname });
   // Order matters: listen -> prepare -> build. `build` starts the dev runner.
