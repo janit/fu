@@ -8,7 +8,28 @@ import * as path from "node:path";
 import { bootModule, css, jsx, optional, ssrModule, virtual, walk } from "./plugins.ts";
 import type { FuOptions } from "./types.ts";
 
-const HERE = import.meta.dirname!;
+/**
+ * Directory holding the framework's own runtime modules, whose paths are handed
+ * to rolldown. `import.meta.dirname` is undefined when this module is loaded
+ * from a remote URL, and a bundler cannot fetch `https:` modules anyway — so
+ * fail with the reason rather than a TypeError three frames later.
+ */
+const HERE = import.meta.dirname ?? remoteFrameworkError();
+
+/**
+ * Extension of the framework's own runtime modules: `.ts` when running from
+ * source (this repo, or JSR), `.js` when running from the compiled npm build.
+ */
+const EXT = import.meta.url.endsWith(".js") ? ".js" : ".ts";
+
+function remoteFrameworkError(): never {
+  throw new Error(
+    "fu: the framework is loaded from a remote URL (" + import.meta.url + "), " +
+      "so its runtime modules cannot be handed to the bundler. Install it " +
+      "instead — `npm:@janit/fu` in a Deno import map, or `npm i @janit/fu` — " +
+      "so it resolves to a real directory.",
+  );
+}
 
 export async function dev(opts: FuOptions): Promise<void> {
   const root = path.resolve(opts.root);
@@ -44,7 +65,7 @@ export async function dev(opts: FuOptions): Promise<void> {
     {
       input: { boot: "fu:boot" },
       plugins: [
-        virtual({ "fu:boot": bootModule(path.join(HERE, "client.ts"), islandFiles, root) }),
+        virtual({ "fu:boot": bootModule(path.join(HERE, `client${EXT}`), islandFiles, root) }),
         css(sheets),
         jsx({ hmr: true }),
       ],
@@ -125,7 +146,7 @@ export async function dev(opts: FuOptions): Promise<void> {
   fs.writeFileSync(
     ssrEntry,
     ssrModule({
-      renderPath: path.join(HERE, "render.ts"),
+      renderPath: path.join(HERE, `render${EXT}`),
       routeFiles,
       root,
       assets,

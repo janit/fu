@@ -21,6 +21,20 @@ in Preact, rolldown, Nitro and lightningcss; this only binds them together.
 
 It is experimental and primarily just for myself. Use it accordingly.
 
+## Installing it
+
+```sh
+deno add npm:@janit/fu        # or: npm i @janit/fu
+```
+
+Install from **npm**, not JSR. The framework hands its own runtime modules to
+rolldown, and a bundler cannot resolve a remote module — Deno keeps JSR packages
+as `https:` URLs, so `jsr:@janit/fu` builds nothing. npm gives a real directory
+on disk. (The JSR copy exists for reading the API and for runtime-only use.)
+
+The npm package ships compiled JavaScript, because Deno refuses to type-strip
+TypeScript inside `node_modules`.
+
 ## Quick start
 
 ```sh

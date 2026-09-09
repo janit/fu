@@ -229,6 +229,29 @@ Each of these cost real debugging and none is documented upstream:
 9. crossws: returning a plain `{crossws}` object fails on Deno. Use inline
    `websocket` hooks, which behave uniformly across runtimes.
 
+## Distribution
+
+The framework is a build tool, not only a runtime library, and that dictates how
+it can be shipped. `build`/`dev` hand the paths of `client.ts`, `render.ts` and
+`hmr-runtime.js` to rolldown, which means those files must exist **on disk**.
+
+Two constraints follow, both found by building the published example as a
+stranger would:
+
+1. **JSR alone does not work.** Deno keeps JSR packages as remote `https:`
+   modules — confirmed with `nodeModulesDir: "auto"` and `deno install`, which
+   vendor the transitive npm dependencies but leave the JSR package remote.
+   `import.meta.dirname` is then undefined, and a bundler cannot fetch `https:`
+   modules anyway.
+2. **The npm package must ship compiled JavaScript.** Deno refuses to
+   type-strip TypeScript inside `node_modules`
+   (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so raw `.ts` is unusable.
+
+So: npm carries a compiled `dist/` and is what apps install; JSR carries the
+TypeScript source for reading and runtime-only use. The sibling-module extension
+is derived from the framework's own module URL, so the same code works from
+source and from the compiled build.
+
 ## Package layout
 
 ```

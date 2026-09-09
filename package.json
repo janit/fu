@@ -1,16 +1,47 @@
 {
   "name": "@janit/fu",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.0.2",
   "type": "module",
   "description": "A minimal islands framework on Preact 11, rolldown and Nitro. Runs on Deno, Node and Bun.",
   "license": "MIT",
   "exports": {
-    ".": "./src/mod.ts",
-    "./build": "./src/build.ts",
-    "./dev": "./src/dev.ts",
-    "./client": "./src/client.ts",
-    "./plugins": "./src/plugins.ts"
+    ".": {
+      "types": "./dist/mod.d.ts",
+      "default": "./dist/mod.js"
+    },
+    "./build": {
+      "types": "./dist/build.d.ts",
+      "default": "./dist/build.js"
+    },
+    "./dev": {
+      "types": "./dist/dev.d.ts",
+      "default": "./dist/dev.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./render": {
+      "types": "./dist/render.d.ts",
+      "default": "./dist/render.js"
+    },
+    "./router": {
+      "types": "./dist/router.d.ts",
+      "default": "./dist/router.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins.d.ts",
+      "default": "./dist/plugins.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "default": "./dist/errors.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "fu": "./src/cli.ts"
@@ -30,9 +61,38 @@
   "devDependencies": {
     "@preact/signals": "^2.11.2",
     "@types/node": "^26.4.1",
-    "preact": "11.0.0-rc.1"
+    "preact": "11.0.0-rc.1",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "types": "./dist/mod.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/janit/fu.git"
+  },
+  "homepage": "https://github.com/janit/fu",
+  "bugs": {
+    "url": "https://github.com/janit/fu/issues"
+  },
+  "keywords": [
+    "islands",
+    "preact",
+    "ssr",
+    "rolldown",
+    "nitro",
+    "deno",
+    "framework"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && cp src/hmr-runtime.js dist/hmr-runtime.js",
+    "prepack": "rm -rf dist && npm run build"
+  },
+  "main": "./dist/mod.js"
 }
