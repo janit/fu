@@ -237,6 +237,23 @@ Deno.test("an error thrown by middleware is caught too", async () => {
   assertStringIncludes(await res.text(), "503: draining");
 });
 
+Deno.test("a middleware throw is rendered after the chain unwinds, undecorated", async () => {
+  // The price of letting a throw propagate past `await ctx.next()`: by the time
+  // it becomes a response, the middleware that set headers have already exited.
+  const app = new App()
+    .use(async (ctx) => {
+      const res = await ctx.next();
+      res.headers.set("X-Seen", "1");
+      return res;
+    })
+    .use(() => {
+      throw new HttpError(503, "draining");
+    });
+  const res = await get(createHandler({ manifest: failing, assets, app, ErrorPage }), "/");
+  assertEquals(res.status, 503);
+  assertEquals(res.headers.get("X-Seen"), null);
+});
+
 Deno.test("an error page that itself throws falls back instead of masking", async () => {
   const handler = createHandler({
     manifest: failing,

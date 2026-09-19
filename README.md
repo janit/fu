@@ -28,10 +28,10 @@ It is experimental and primarily just for myself. Use it accordingly.
 deno add npm:@janit/fu        # or: npm i @janit/fu
 ```
 
-Install from **npm**, not JSR. The framework hands its own runtime modules to
-rolldown, and a bundler cannot resolve a remote module — Deno keeps JSR packages
-as `https:` URLs, so `jsr:@janit/fu` builds nothing. npm gives a real directory
-on disk. (The JSR copy exists for reading the API and for runtime-only use.)
+npm is the only channel. The framework hands its own runtime modules to
+rolldown, so it must be a real directory on disk, which an npm install is. It
+was on JSR up to 0.0.4 and was withdrawn from there: Deno keeps JSR packages
+as remote `https:` modules, and a bundler cannot fetch one.
 
 The npm package ships compiled JavaScript, because Deno refuses to type-strip
 TypeScript inside `node_modules`.
@@ -48,8 +48,8 @@ deno task todo:dev     # the fu-todo example app
 deno task todo:build
 deno task todo:start   # serve its build on :1337
 
-deno task test     # 59 unit tests
-deno task check    # format, lint, types (framework and both apps), tests, jsr dry-run
+deno task test     # unit tests, no browser
+deno task check    # format, lint, types (framework and both apps), tests
 deno task check:pkg  # build, serve and dev-serve a real app from the packed npm artefact
 ```
 
@@ -151,6 +151,18 @@ export const redirects: Middleware<State> = (ctx) => {
 };
 ```
 
+Nothing in a request says whether `fu dev` or a build is serving it, and the
+same middleware runs in both. So the dev server sets `FU_DEV=1` in its own
+environment before it starts the app, and a built server never does. Read it
+for anything that must be laxer in dev — a Content-Security-Policy, say, which
+has to name the HMR socket on `port + 1`, because a different port is a
+different origin:
+
+```ts
+const dev = Deno.env.get("FU_DEV") === "1"; // process.env.FU_DEV on Node and Bun
+const connectSrc = dev ? "connect-src 'self' ws://localhost:*" : "connect-src 'self'";
+```
+
 ## Errors
 
 Anything thrown by a handler, a page or a middleware is turned into a response
@@ -181,8 +193,13 @@ Two things the framework does for you:
   During a deploy a valid URL can 404 for a few seconds, and a shared cache
   would pin that.
 
-Errors are caught at the route boundary and returned *through* the middleware
-chain, so security headers and logging middleware still see them.
+Errors from a handler or a page are caught at the route boundary and returned
+*through* the middleware chain, so security headers and logging middleware still
+see them. A middleware that throws is different: the throw propagates outward
+past every `await ctx.next()`, so an outer middleware can catch it, and only what
+nobody catches becomes an error response — at the very top, after the chain has
+unwound, without the headers the middleware would have set. To refuse a request
+from middleware, return the response rather than throwing.
 
 ## Page metadata
 
@@ -258,7 +275,7 @@ the full rationale and the nine undocumented traps this implementation encodes.
 deno task test
 ```
 
-`deno test` over `src/`, no browser needed. The suite is written against the
+`deno test` over the whole workspace, no browser needed. The framework suite is written against the
 failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |

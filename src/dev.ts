@@ -16,6 +16,16 @@ import {
 } from "./driver.ts";
 import type { FuOptions } from "./types.ts";
 
+/** Set an env var on whichever runtime we are on; `Deno.env` is Deno-only. */
+function setEnv(name: string, value: string): void {
+  const g = globalThis as {
+    Deno?: { env: { set(k: string, v: string): void } };
+    process?: { env: Record<string, string | undefined> };
+  };
+  if (g.Deno) g.Deno.env.set(name, value);
+  else if (g.process) g.process.env[name] = value;
+}
+
 export async function dev(opts: FuOptions): Promise<void> {
   const project = scanProject(opts.root);
   const { clientDir } = project;
@@ -24,6 +34,11 @@ export async function dev(opts: FuOptions): Promise<void> {
   // and from inside containers, not just loopback.
   const hostname = opts.hostname ?? "0.0.0.0";
   const hmrPort = port + 1;
+  // An app cannot otherwise tell dev from production: nothing in the
+  // environment says so, and the same middleware runs in both. Anything that
+  // must be laxer in dev — a CSP that has to allow the HMR socket on
+  // `hmrPort`, a verbose error page — reads this.
+  setEnv("FU_DEV", "1");
 
   emptyDir(clientDir);
   const sheets = new Map<string, string>();

@@ -1,24 +1,10 @@
 {
-  "name": "@janit/fu",
-  "version": "0.1.0",
-  "license": "MIT",
   "workspace": [
     "./example"
   ],
-  "exports": {
-    ".": "./src/mod.ts",
-    "./build": "./src/build.ts",
-    "./dev": "./src/dev.ts",
-    "./client": "./src/client.ts",
-    "./render": "./src/render.ts",
-    "./router": "./src/router.ts",
-    "./plugins": "./src/plugins.ts",
-    "./cli": "./src/cli.ts",
-    "./errors": "./src/errors.ts"
-  },
   "compilerOptions": {
     "jsx": "react-jsx",
-    "jsxImportSource": "npm:preact@^11.0.0-rc.1",
+    "jsxImportSource": "npm:preact@^11.0.0-rc.2",
     "lib": [
       "deno.ns",
       "dom",
@@ -27,12 +13,12 @@
     ]
   },
   "imports": {
-    "preact": "npm:preact@^11.0.0-rc.1",
+    "preact": "npm:preact@^11.0.0-rc.2",
     "preact-render-to-string": "npm:preact-render-to-string@^6.7.0",
     "@preact/signals": "npm:@preact/signals@^2.11.2",
     "urlpattern-polyfill": "npm:urlpattern-polyfill@^10.1.0",
-    "rolldown": "npm:rolldown@^1.2.7",
-    "rolldown/experimental": "npm:rolldown@^1.2.7/experimental",
+    "rolldown": "npm:rolldown@^1.2.8",
+    "rolldown/experimental": "npm:rolldown@^1.2.8/experimental",
     "lightningcss": "npm:lightningcss@^1.33.0",
     "nitro/builder": "npm:nitro@^3.0.260903-beta/builder",
     "crossws/server": "npm:crossws@^0.4.12/server",
@@ -48,29 +34,12 @@
   "tasks": {
     "dev": "deno run -A --node-modules-dir=manual src/cli.ts dev example",
     "build": "deno run -A --node-modules-dir=manual src/cli.ts build example",
-    "check": "deno fmt --check && deno lint && deno check src/mod.ts src/cli.ts example fu-todo && deno test -A --node-modules-dir=manual src/ && deno publish --dry-run --allow-dirty",
+    "check": "deno fmt --check && deno lint && deno check && deno test -A --node-modules-dir=manual",
     "todo:dev": "deno run -A --node-modules-dir=manual src/cli.ts dev fu-todo",
     "todo:build": "deno run -A --node-modules-dir=manual src/cli.ts build fu-todo",
     "todo:start": "cd fu-todo && PORT=1337 deno run -A .output/server/index.mjs",
-    "test": "deno test -A --node-modules-dir=manual src/",
+    "test": "deno test -A --node-modules-dir=manual",
     "check:pkg": "npm run build && ./scripts/check-package.sh"
-  },
-  "publish": {
-    "exclude": [
-      "**/*_test.ts",
-      "*.log",
-      ".claude",
-      ".fu",
-      ".output",
-      "data",
-      "dist",
-      "docs",
-      "example",
-      "fu-todo",
-      "node_modules",
-      "package-lock.json",
-      "scripts"
-    ]
   },
   "nodeModulesDir": "manual",
   "fmt": {

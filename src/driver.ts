@@ -16,7 +16,7 @@ import type { Assets } from "./types.ts";
  */
 const HERE = import.meta.dirname ?? remoteFrameworkError();
 
-/** `.ts` when running from source (this repo, or JSR), `.js` from the compiled npm build. */
+/** `.ts` when running from source (this repo), `.js` from the compiled npm build. */
 const EXT = import.meta.url.endsWith(".js") ? ".js" : ".ts";
 
 function remoteFrameworkError(): never {
@@ -31,8 +31,7 @@ function remoteFrameworkError(): never {
 /**
  * The framework's own package name, read from the package.json above the
  * runtime modules: this repo's at the root, or the installed package's. Absent
- * when neither exists (a JSR install), in which case apps must alias it
- * themselves.
+ * when neither exists, in which case apps must alias it themselves.
  */
 const PACKAGE_NAME = ((): string | null => {
   try {

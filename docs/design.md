@@ -221,6 +221,15 @@ but the swap is wrong and needs a manual refresh. Mitigation when it matters:
 hash the island's hook-call count in the transform and force a remount when it
 changes.
 
+**Telling dev from production.** Nitro's rolldown builder replaces neither
+`import.meta.dev` nor `process.env.NODE_ENV` (only its Vite builder defines the
+latter), so an app's code cannot see which server it is in. `fu dev` sets
+`FU_DEV=1` in its own environment before Nitro starts the app; a built server
+never sets it. The case that forced it: fu-todo's CSP is `connect-src 'self'`,
+and the HMR socket on `port + 1` is a different origin, so dev — and only dev —
+has to name it. It is an environment variable rather than an export because the
+app reads it at module load, on any runtime, with no framework import.
+
 ### Traps encoded in the implementation
 
 Each of these cost real debugging and none is documented upstream:
@@ -270,7 +279,7 @@ it can be shipped. `build`/`dev` hand the paths of `client.ts`, `render.ts` and
 Two constraints follow, both found by building the published example as a
 stranger would:
 
-1. **JSR alone does not work.** Deno keeps JSR packages as remote `https:`
+1. **JSR does not work.** Deno keeps JSR packages as remote `https:`
    modules — confirmed with `nodeModulesDir: "auto"` and `deno install`, which
    vendor the transitive npm dependencies but leave the JSR package remote.
    `import.meta.dirname` is then undefined, and a bundler cannot fetch `https:`
@@ -279,10 +288,18 @@ stranger would:
    type-strip TypeScript inside `node_modules`
    (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so raw `.ts` is unusable.
 
-So: npm carries a compiled `dist/` and is what apps install; JSR carries the
-TypeScript source for reading and runtime-only use. The sibling-module extension
-is derived from the framework's own module URL, so the same code works from
-source and from the compiled build.
+So npm carries a compiled `dist/` and is the only channel. The sibling-module
+extension is derived from the framework's own module URL, so the same code
+works from source and from the compiled build.
+
+JSR was tried and retired. Versions 0.0.1 to 0.0.4 went there as "the source,
+for reading the API and runtime-only use", which nobody does; what it actually
+cost was a second publish that drifted from npm within a day, the slow-types
+rule on every exported signature, a `name`/`version`/`exports` map in
+`deno.json` to keep in step with `package.json`, a dry-run in the check task
+guarding a channel the README had to warn people off, and a README caveat
+explaining all of that. `deno.json` is now only tasks, imports, workspace and
+tool config; `package.json` is the package.
 
 Inside this repo the compiled `dist/` is a hazard rather than a product: see
 trap 10. The apps must build against `src/`, and the drivers' self-alias is
@@ -338,13 +355,12 @@ fu-todo/           complete app with SQLite and a JSON API (workspace member,
 `build.ts` and `dev.ts` are each a page: everything they would otherwise
 duplicate lives in `driver.ts`. `plugins.ts` knows nothing about projects.
 `deno task check` runs `deno fmt --check`, `deno lint`, type checks of the
-framework and both apps, the tests and a JSR dry-run; `deno task check:pkg`
-packs and exercises the npm artefact.
+framework and both apps, and the tests; `deno task check:pkg` packs and
+exercises the npm artefact.
 
-JSR enforces "no slow types": every exported function needs an explicit return
-type. This cost exactly one annotation in the probe. Publishing is optional —
-JSR has no private packages, so a private repo is consumed via a git or `file:`
-dependency instead.
+Exported functions keep explicit return types. JSR's slow-types rule imposed
+that and JSR is gone, but the habit makes the public surface readable without
+inference and stays.
 
 ## Versions
 
@@ -357,9 +373,8 @@ public usage"; instability here is accepted deliberately.
 
 Production build on Deno and Node; one `node-server` artifact serving on Node,
 Bun and Deno; dev server with island HMR, CSS HMR and route rebuild; hydration
-in dev and prod; CSS Modules with `composes`; wildcard routing; `deno publish
---dry-run` clean; the npm artefact building and serving an app through its
-own bin.
+in dev and prod; CSS Modules with `composes`; wildcard routing; the npm
+artefact building, serving and dev-serving an app through its own bin.
 
 The HMR claims are checked in a real browser, not inferred: headless Chromium
 (Playwright) loads the prod build and clicks all three islands, then loads the

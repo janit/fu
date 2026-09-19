@@ -1,7 +1,9 @@
-// @ts-check
 // Fresh Urquell HMR client runtime. Rolldown's default runtime registers new module
 // factories but never *applies* them; this one does the apply walk:
 // swap the module, re-run its factory, then fire its accept callbacks.
+//
+// Not type-checked: `DevRuntime` is injected by rolldown when this source is
+// inlined via `devMode.implement`, so it does not exist as a module.
 
 /** @type {any} */
 const BaseDevRuntime = DevRuntime;

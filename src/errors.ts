@@ -6,6 +6,9 @@ import type { RouteError } from "./types.ts";
  * ```ts
  * if (!session) throw new HttpError(403, "Not your todo");
  * ```
+ *
+ * In middleware, prefer returning the response: a throw there unwinds past the
+ * middleware that would have set headers on it.
  */
 export class HttpError extends Error {
   readonly status: number;
@@ -41,6 +44,9 @@ export function statusText(status: number): string {
  *
  * A `status` property is honoured wherever it appears, so errors from other
  * libraries (h3, fetch wrappers) map sensibly instead of collapsing to 500.
+ * Their message is only carried through below 500: a foreign 5xx can say
+ * anything — node:sqlite names the database path, a driver quotes the SQL —
+ * and `message` is the one field the error page renders.
  */
 export function toRouteError(err: unknown): RouteError {
   if (err instanceof HttpError) {
@@ -49,11 +55,10 @@ export function toRouteError(err: unknown): RouteError {
   const status = (err as { status?: unknown } | null)?.status;
   if (typeof status === "number" && status >= 400 && status <= 599) {
     const message = (err as { message?: unknown }).message;
-    return {
-      status,
-      message: typeof message === "string" && message ? message : statusText(status),
-      cause: err,
-    };
+    const safe = status < 500 && typeof message === "string" && message
+      ? message
+      : statusText(status);
+    return { status, message: safe, cause: err };
   }
   return { status: 500, message: statusText(500), cause: err };
 }

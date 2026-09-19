@@ -150,8 +150,13 @@ function htmlResponse<S>(
 /**
  * Turn a failure into a response. Rendered through `routes/_error.tsx` when the
  * project has one, so it inherits the app's markup and styling; otherwise plain
- * text. Either way it goes back out through the middleware chain as a normal
- * response, so security headers and logging still apply.
+ * text.
+ *
+ * For a handler or page failure this runs at the route boundary, so the
+ * response goes back out through the middleware chain and security headers and
+ * logging still apply. For a middleware throw it runs only after the whole
+ * chain has unwound — the throw propagates past every `await ctx.next()` so an
+ * outer middleware can catch it — and nothing decorates the response.
  */
 export async function renderError<S>(
   ctx: Ctx<S>,

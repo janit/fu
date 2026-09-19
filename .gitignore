@@ -6,5 +6,6 @@ dist/
 *.log
 .claude/
 fu-todo/data/
+/data/
 deno.lock
 .serena/
