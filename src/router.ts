@@ -100,11 +100,39 @@ export function match<S = Record<string, unknown>>(
     if (route.score === 2 ? n < route.segments - 1 : n !== route.segments) continue;
     const m = route.urlPattern.exec(input);
     if (!m) continue;
-    const params: Record<string, string> = {};
-    for (const [k, v] of Object.entries(m.pathname.groups)) {
-      if (v !== undefined) params[k] = decodeURIComponent(v);
-    }
-    return { route, params };
+    const params = decodeParams(route.pattern, m.pathname.groups);
+    if (params) return { route, params };
   }
   return null;
+}
+
+/**
+ * Decoded params, or null when the request should not match this route.
+ *
+ * URLPattern matches the encoded path, so `%2F` passes as part of one segment
+ * and only becomes a separator on decoding: `[slug]` would hand the app
+ * `../../etc/passwd`, a traversal for the first handler that joins it onto a
+ * directory. So a value may not hold NUL, a backslash, or a `.`/`..` segment,
+ * and only a wildcard may hold `/`. A malformed escape is no match either,
+ * rather than a throw.
+ */
+function decodeParams(
+  pattern: string,
+  groups: Record<string, string | undefined>,
+): Record<string, string> | null {
+  const params: Record<string, string> = {};
+  for (const [k, raw] of Object.entries(groups)) {
+    if (raw === undefined) continue;
+    let v: string;
+    try {
+      v = decodeURIComponent(raw);
+    } catch {
+      return null;
+    }
+    if (v.includes("\0") || v.includes("\\")) return null;
+    if (v.includes("/") && !pattern.includes(`:${k}*`)) return null;
+    if (v.split("/").some((s) => s === "." || s === "..")) return null;
+    params[k] = v;
+  }
+  return params;
 }

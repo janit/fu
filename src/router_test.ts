@@ -66,3 +66,36 @@ Deno.test("a wildcard also matches its own base path", () => {
   assertEquals(match(routes, "/files")?.route.pattern, "/files/:rest*");
   assertEquals(match(routes, "/file"), null);
 });
+
+Deno.test("an escaped separator does not smuggle a path into a single-segment param", () => {
+  const routes = buildRoutes({ "/routes/blog/[slug].tsx": mod });
+  assertEquals(match(routes, "/blog/..%2F..%2Fetc%2Fpasswd"), null);
+  assertEquals(match(routes, "/blog/a%2Fb"), null);
+  assertEquals(match(routes, "/blog/..%5C..%5Cwin.ini"), null);
+  assertEquals(match(routes, "/blog/a%00b"), null);
+});
+
+Deno.test("a wildcard spans segments but never steps out of its base", () => {
+  const routes = buildRoutes({ "/routes/files/[...rest].tsx": mod });
+  assertEquals(match(routes, "/files/a%2Fb")?.params, { rest: "a/b" });
+  assertEquals(match(routes, "/files/..%2F..%2Fetc%2Fpasswd"), null);
+  // A dot segment written out (`/.%2E/`) is resolved by URL parsing before
+  // matching; one glued to an escaped slash only surfaces on decoding.
+  assertEquals(match(routes, "/files/a/.%2E/b")?.params, { rest: "b" });
+  assertEquals(match(routes, "/files/%2E%2E%2Fsecret"), null);
+  assertEquals(match(routes, "/files/a%00"), null);
+});
+
+Deno.test("a rejected param falls through to the next route that fits", () => {
+  const routes = buildRoutes({
+    "/routes/blog/[slug].tsx": mod,
+    "/routes/blog/[...rest].tsx": mod,
+  });
+  assertEquals(match(routes, "/blog/a%2Fb")?.params, { rest: "a/b" });
+});
+
+Deno.test("a malformed escape is no match, not a throw", () => {
+  const routes = buildRoutes({ "/routes/blog/[slug].tsx": mod });
+  assertEquals(match(routes, "/blog/%E0%A4%A"), null);
+  assertEquals(match(routes, "/blog/%"), null);
+});

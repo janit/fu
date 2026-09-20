@@ -280,12 +280,13 @@ failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |
 |---|---|
-| router | static beats dynamic beats wildcard; wildcards span segments and match their own base path; params decode; a non-ASCII static route matches its percent-encoded request |
+| router | static beats dynamic beats wildcard; wildcards span segments and match their own base path; params decode, but an escaped `/`, NUL, backslash or dot segment never reaches one; a non-ASCII static route matches its percent-encoded request |
 | middleware | outer unwinds last and decorates inner short-circuits; `next()` twice rejects; throws propagate |
 | render | head escaping; JSON-LD cannot close its own `<script>`; 404 vs 405; islands get a marker |
 | errors | a 500 never leaks its message; error responses are uncacheable; a broken error page falls back |
 | plugins | `composes` keeps every class name; CSS output changes with content; the JSX transform never touches rolldown's runtime; the package self-alias |
 | driver | the server entry imports only the optional files that exist; the H3Event unwrap |
+| dev | the HMR socket admits only the dev server's own pages, not another site or a rebound name |
 
 Two of these were found by writing the suite, not before it: `ctx.next()` called
 twice resumed at the wrong depth, and a middleware throwing synchronously

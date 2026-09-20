@@ -94,6 +94,15 @@ File-path mapping:
 
 Routes sort static → dynamic → wildcard, then by depth.
 
+Params are decoded after URLPattern matches the encoded path, so `%2F` passes
+as part of one segment and only then becomes a slash. Left alone, `[slug]`
+would hand a handler `../../etc/passwd` from `/blog/..%2F..%2Fetc%2Fpasswd` —
+a traversal for the first app that joins a param onto a directory. A decoded
+value holding NUL, a backslash or a `.`/`..` segment is therefore no match, and
+only a wildcard may hold `/`; the router moves on to the next route, so
+`[...rest]` beside `[slug]` still takes `a%2Fb`. A malformed escape is no match
+too, rather than a 500.
+
 `URLPattern.exec` is not cheap: ~3.5 µs per route on Deno, so a 16-route app
 spent 30–60 µs routing every request, more than the Preact render of a small
 page. Two facts fix that without leaving the standard. The `{ pathname }`
@@ -207,6 +216,13 @@ correctly emits no update, and CSS HMR silently never fires.
 rolldown `DevEngine` produces patches; `crossws` carries them; Nitro serves the
 app. Editing an island hot-swaps its markup **and preserves hook state**;
 editing CSS swaps the stylesheet in place; editing a route rebuilds the server.
+
+The HMR socket streams module source on every save, and a browser lets any
+site open a WebSocket to localhost — no CORS applies to the handshake. So it
+checks `Origin`: only a page on the dev port, under a loopback name or the
+bound `--host`, gets a socket; everything else, including DNS rebinding (which
+keeps the port but not the name) and a missing `Origin`, gets a 403. It binds
+the same host as the dev server.
 
 **State preservation without Babel.** Prefresh would reintroduce Babel into an
 otherwise all-Rust pipeline. Instead, islands hydrate behind a wrapper whose

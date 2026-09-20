@@ -26,6 +26,28 @@ function setEnv(name: string, value: string): void {
   else if (g.process) g.process.env[name] = value;
 }
 
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Whether a page at `origin` may open the HMR socket. A browser lets any site
+ * open a WebSocket to localhost, and this one streams module source on every
+ * save, so only the dev server's own pages get in: its port, on a loopback
+ * name or the host it was bound to. The HMR runtime dials localhost, so a page
+ * on another machine never gets a working socket anyway.
+ */
+export function hmrOriginAllowed(origin: string | null, port: number, hostname: string): boolean {
+  if (!origin) return false;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (url.port !== String(port)) return false;
+  return LOOPBACK.has(url.hostname) || url.hostname === hostname;
+}
+
 export async function dev(opts: FuOptions): Promise<void> {
   const project = scanProject(opts.root);
   const { clientDir } = project;
@@ -111,8 +133,14 @@ export async function dev(opts: FuOptions): Promise<void> {
   serve(
     {
       port: hmrPort,
+      hostname,
       fetch: () => new Response("fu hmr"),
       websocket: {
+        upgrade(req) {
+          if (!hmrOriginAllowed(req.headers.get("origin"), port, hostname)) {
+            return new Response("Forbidden", { status: 403 });
+          }
+        },
         async open(peer) {
           const id = clientIdOf(peer as never);
           if (!id) return;
