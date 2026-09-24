@@ -81,7 +81,8 @@ deployment targets, and `srvx` absorbs the runtime differences — one
 **Routing.** `URLPattern`, a web standard. Native on Deno and Bun; Node ships it
 in 24+. On Node 22 it is absent entirely (not under `node:url`, not behind a
 flag), so the router loads `urlpattern-polyfill` only when the global is
-missing. Deno and Bun ship zero polyfill bytes.
+missing. Deno and Bun never execute it, though the server bundle still carries
+its ~24 kB.
 
 File-path mapping:
 
@@ -92,7 +93,9 @@ File-path mapping:
 | `routes/blog/[slug].tsx` | `/blog/:slug` |
 | `routes/files/[...rest].tsx` | `/files/:rest*` |
 
-Routes sort static → dynamic → wildcard, then by depth.
+Routes sort static → dynamic → wildcard, then by depth, then segment by segment
+(a literal beats a param), then by pattern — so the file system's listing order
+never decides which of two overlapping routes wins.
 
 Params are decoded after URLPattern matches the encoded path, so `%2F` passes
 as part of one segment and only then becomes a slash. Left alone, `[slug]`
@@ -167,8 +170,9 @@ interface Ctx<S> {
 }
 ```
 
-One `ctx` object is shared by the whole chain so `state` and `head` mutations
-propagate both inward and outward; only `next` is rebound per level. Calling
+One `ctx` is shared by the whole chain: each level is a thin view whose fields
+read and write the root, so what the router writes (`params`, `data`, `error`)
+reaches every middleware on the way out; only `next` is per level. Calling
 `next()` twice rejects rather than silently double-running the chain.
 
 Middleware runs **before** routing, so `ctx.params` is empty inside it. That is
@@ -285,6 +289,17 @@ Each of these cost real debugging and none is documented upstream:
 11. Nitro hard-codes `node_modules/.nitro` under `rootDir` for its well-known
     files regardless of `buildDir`, so every app directory grows a
     `node_modules/`. Harmless under the Deno workspace; do not fight it.
+12. Nitro picks its preset from the runtime running the build. Built under
+    Deno, the output calls `Deno.serve` and crashes on Node and Bun, so the
+    build driver sets `node-server` unless `NITRO_PRESET` says otherwise.
+13. Nitro sends a public dir's `maxAge` only when the dir is mounted below
+    `/`: one at the root falls through to the app and gets no cache header.
+    Hence the build serves its hashed client files from `/_fu/`. That header
+    is a route rule applied after the app answers, so the bare `/_fu/`, which
+    falls through to the app's 404, needs an exact rule to override it.
+14. Nitro writes into the output dir without clearing it, so earlier builds'
+    hashed assets and another preset's `deno.json` ship along. The build
+    removes a dir holding `nitro.json` first.
 
 ## Distribution
 
@@ -347,7 +362,8 @@ as the fallback since the dev server ignores SIGTERM.
 ## Package layout
 
 ```
-deno.json          @janit/fu, exports map, npm: imports, workspace, fmt/lint
+package.json       the npm package: name, exports map, bin, dependencies
+deno.json          npm: imports, workspace, tasks, fmt/lint
 src/
   mod.ts           core public exports
   types.ts         shared types
@@ -380,8 +396,7 @@ inference and stays.
 
 ## Versions
 
-Preact 11 (`11.0.0-rc.1` verified; rc.2 exists but is newer than the
-`min-release-age=4` npmrc quarantine), `@preact/signals` 2.11, Nitro 3 beta,
+Preact 11 (`11.0.0-rc.2`), `@preact/signals` 2.11, Nitro 3 beta,
 rolldown 1.2, lightningcss 1.33. rolldown's `devMode` is marked "not ready for
 public usage"; instability here is accepted deliberately.
 

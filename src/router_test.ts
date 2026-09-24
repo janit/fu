@@ -27,6 +27,17 @@ Deno.test("routes sort static before dynamic before wildcard", () => {
   ]);
 });
 
+Deno.test("overlapping routes of the same kind resolve the same whatever the file order", () => {
+  const files = ["/routes/[lang]/about.tsx", "/routes/blog/[slug].tsx", "/routes/[a]/[b].tsx"];
+  for (const order of [files, [...files].reverse()]) {
+    const routes = buildRoutes(Object.fromEntries(order.map((f) => [f, mod])));
+    // The earliest literal segment decides.
+    assertEquals(match(routes, "/blog/about")?.route.pattern, "/blog/:slug");
+    assertEquals(match(routes, "/en/about")?.route.pattern, "/:lang/about");
+    assertEquals(match(routes, "/en/other")?.route.pattern, "/:a/:b");
+  }
+});
+
 Deno.test("a static route wins over a dynamic one that also matches", () => {
   const routes = buildRoutes({ "/routes/[slug].tsx": mod, "/routes/about.tsx": mod });
   assertEquals(match(routes, "/about")?.route.pattern, "/about");

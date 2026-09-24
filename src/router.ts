@@ -69,7 +69,24 @@ export function buildRoutes<S = Record<string, unknown>>(
       segments: countSegments(pattern),
     });
   }
-  return out.sort((a, b) => a.score - b.score || b.segments - a.segments);
+  return out.sort((a, b) =>
+    a.score - b.score || b.segments - a.segments || bySegment(a.pattern, b.pattern)
+  );
+}
+
+/**
+ * Tie-break between routes of the same kind and length, so the winner never
+ * depends on the order the file system listed them in: compared segment by
+ * segment, a literal beats a param (`/blog/:slug` before `/:lang/about`), and
+ * what is still tied sorts by pattern.
+ */
+function bySegment(a: string, b: string): number {
+  const as = a.split("/"), bs = b.split("/");
+  for (let i = 0; i < as.length && i < bs.length; i++) {
+    const d = Number(as[i].startsWith(":")) - Number(bs[i].startsWith(":"));
+    if (d) return d;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function countSegments(pathname: string): number {

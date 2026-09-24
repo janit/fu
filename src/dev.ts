@@ -104,7 +104,6 @@ export async function dev(opts: FuOptions): Promise<void> {
           fs.writeFileSync(path.join(clientDir, update.filename), update.code);
           peer.send(JSON.stringify({
             type: "hmr:update",
-            path: "/" + update.filename,
             url: "/" + update.filename,
             changedIds: update.changedIds,
           }));
@@ -163,7 +162,12 @@ export async function dev(opts: FuOptions): Promise<void> {
     js: [{ href: "/boot.js" }],
     css: [{ href: "/style.css" }],
   });
-  const nitro = await createNitro({ ...nitroOptions(project, ssrEntry), dev: true });
+  // Sharing `sheets` puts CSS that only a route or the shell imports into the
+  // same /style.css; the server build flushes it, since the client never sees it.
+  const nitro = await createNitro({
+    ...nitroOptions(project, ssrEntry, sheets, flushCss),
+    dev: true,
+  });
   const server = createDevServer(nitro);
   server.listen({ port, hostname });
   // Order matters: listen -> prepare -> build. `build` starts the dev runner.

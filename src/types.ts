@@ -7,6 +7,8 @@ export interface Asset {
 export interface Assets {
   js: Asset[];
   css: Asset[];
+  /** Modules the entry will import, announced early as `modulepreload`. */
+  preload?: Asset[];
 }
 
 /**
@@ -37,6 +39,8 @@ export interface RouteError {
   status: number;
   /** Safe to render. For a 500 this is generic, never the underlying message. */
   message: string;
+  /** Headers the error response must carry, from an `HttpError`. */
+  headers?: Headers;
   /** What was actually thrown. Log it; do not render it. */
   cause?: unknown;
 }
@@ -76,10 +80,16 @@ export type RouteHandler<S = Record<string, unknown>> = (
   ctx: Ctx<S>,
 ) => unknown | Promise<unknown>;
 
+/**
+ * A route's handlers, keyed by HTTP method. Annotate with it so `ctx` is typed:
+ * `export const handlers: Handlers<State> = { GET(ctx) { ... } };`
+ */
+export type Handlers<S = Record<string, unknown>> = Record<string, RouteHandler<S>>;
+
 /** A user-authored route module. */
 export interface RouteModule<S = Record<string, unknown>> {
   default?: (ctx: Ctx<S>) => unknown;
-  handlers?: Record<string, RouteHandler<S>>;
+  handlers?: Handlers<S>;
 }
 
 /**

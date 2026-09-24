@@ -1,0 +1,7 @@
+/* Imported by the shell, which only the server bundle sees: the build walks the
+   server entry points for CSS so these rules still reach the stylesheet. */
+.shell {
+  max-width: 48rem;
+  margin: 0 auto;
+  font-family: system-ui, sans-serif;
+}

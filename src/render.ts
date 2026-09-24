@@ -2,7 +2,7 @@ import { type ComponentChildren, type ComponentType, h, options, type VNode } fr
 import { renderToStringAsync } from "preact-render-to-string";
 import { buildRoutes, match, type Route } from "./router.ts";
 import { type App, compose } from "./app.ts";
-import type { Assets, Ctx, Head, RouteManifest } from "./types.ts";
+import type { Assets, Ctx, Head, RouteError, RouteManifest, RouteModule } from "./types.ts";
 import { HttpError, statusText, toRouteError } from "./errors.ts";
 
 /** Property the SSR transform stamps onto island exports. */
@@ -35,7 +35,7 @@ function installIslandHook(): void {
         w = ((props: Record<string, unknown>) =>
           h("div", {
             "data-island": key,
-            "data-props": JSON.stringify(props ?? {}),
+            "data-props": serializeProps(key, props),
           }, h(Inner as never, props as never))) as ComponentType<never>;
         wrapped.set(type, w);
       }
@@ -43,6 +43,29 @@ function installIslandHook(): void {
     }
     prev?.(vnode);
   };
+}
+
+/**
+ * Island props as the JSON the client hydrates from. A function or a JSX
+ * element cannot cross that boundary: JSON drops the one and turns the other
+ * into an object Preact will not render, so the island would hydrate without
+ * it and wipe what the server showed. Fail the render instead, naming the prop.
+ */
+function serializeProps(key: string, props: Record<string, unknown> | null): string {
+  return JSON.stringify(props ?? {}, (k, v) => {
+    const kind = typeof v === "function"
+      ? "function"
+      : v && typeof v === "object" && v.constructor === undefined && "type" in v && "props" in v
+      ? "JSX element"
+      : null;
+    if (kind) {
+      throw new Error(
+        `fu: island ${key} was passed a ${kind} in prop "${k}", but island props must be ` +
+          `JSON. Render it inside the island, or pass the data it needs.`,
+      );
+    }
+    return v;
+  });
 }
 
 /** Optional root wrapper (`routes/_app.tsx`) around every page. */
@@ -63,7 +86,7 @@ export interface HandlerParts<S> {
    * `ctx` exactly like a page component, with `ctx.error` set.
    */
   ErrorPage?: (ctx: Ctx<S>) => unknown;
-  /** Initial state for each request. Shallow-copied per request. */
+  /** Initial state for each request, called once per request. */
   initialState?: () => S;
 }
 
@@ -90,8 +113,30 @@ export function createHandler<S = Record<string, unknown>>(
     };
     // Middleware runs outside renderRoute's try, so a throw up there would
     // otherwise escape to the server as an unhandled 500.
-    return run(ctx).catch((err) => renderError(ctx, err, parts));
+    const res = run(ctx).catch((err) => renderError(ctx, err, parts));
+    // HEAD is answered like GET, down to the headers, minus the body — error
+    // responses included. Stripped here, outermost, so middleware sees the
+    // same response either way.
+    return req.method === "HEAD" ? res.then(withoutBody) : res;
   };
+}
+
+function withoutBody(res: Response): Response {
+  res.body?.cancel();
+  return new Response(null, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+}
+
+/** Methods a route answers: its handlers, GET when it has a page, HEAD with GET, OPTIONS always. */
+function allowed(mod: RouteModule<never>): string {
+  const methods = new Set(Object.keys(mod.handlers ?? {}));
+  if (mod.default) methods.add("GET");
+  if (methods.has("GET")) methods.add("HEAD");
+  methods.add("OPTIONS");
+  return [...methods].join(", ");
 }
 
 async function renderRoute<S>(
@@ -107,12 +152,24 @@ async function renderRoute<S>(
     // Cached on the route: a dynamic import of a loaded module is cheap but
     // not free, and the manifest never changes within one server process.
     const mod = m.route.module ??= await m.route.load();
-    if (mod.handlers) {
-      const fn = mod.handlers[ctx.req.method];
-      if (!fn) throw new HttpError(405);
+    const method = ctx.req.method;
+    // HEAD borrows the GET handler unless it has its own; the body is dropped
+    // on the way out.
+    const fn = mod.handlers?.[method] ?? (method === "HEAD" ? mod.handlers?.GET : undefined);
+    if (fn) {
       const result = await fn(ctx);
       if (result instanceof Response) return result;
       ctx.data = result;
+    } else if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: { allow: allowed(mod) } });
+    } else if (method !== "GET" && method !== "HEAD" || !mod.default) {
+      // A page renders for GET and HEAD without a handler; anything else needs one.
+      const status = mod.handlers || mod.default ? 405 : 404;
+      throw new HttpError(
+        status,
+        undefined,
+        status === 405 ? { headers: { allow: allowed(mod) } } : undefined,
+      );
     }
 
     const Page = mod.default;
@@ -171,19 +228,39 @@ export async function renderError<S>(
 
   if (parts.ErrorPage) {
     try {
-      ctx.head.title ??= `${error.status} ${statusText(error.status)}`;
-      ctx.head.robots ??= "noindex";
+      resetHead(ctx.head, `${error.status} ${statusText(error.status)}`);
       const body = await renderTree(ctx, h(parts.ErrorPage as never, ctx as never), parts);
-      return htmlResponse(body, ctx, parts, error.status);
+      return withErrorHeaders(htmlResponse(body, ctx, parts, error.status), error);
     } catch (pageErr) {
       // An error page that throws must not mask the original failure.
       console.error("[fu] the error page itself threw", pageErr);
     }
   }
-  return new Response(`${error.status} ${error.message}`, {
-    status: error.status,
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
-  });
+  return withErrorHeaders(
+    new Response(`${error.status} ${error.message}`, {
+      status: error.status,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    }),
+    error,
+  );
+}
+
+/**
+ * Clear what the failed page said about itself before the error page renders:
+ * its title, canonical and JSON-LD would otherwise describe a page that does
+ * not exist, and a middleware's `robots: "index"` would let a 404 be indexed.
+ * `lang` and `links` are app-wide (a tenant's language, font preloads), so they
+ * stay. Cleared in place, because middleware holds the same object.
+ */
+function resetHead(head: Head, title: string): void {
+  const { lang, links } = head;
+  for (const k of Object.keys(head)) delete head[k as keyof Head];
+  Object.assign(head, { title, robots: "noindex" }, lang && { lang }, links && { links });
+}
+
+function withErrorHeaders(res: Response, error: RouteError): Response {
+  error.headers?.forEach((v, k) => res.headers.set(k, v));
+  return res;
 }
 
 const escapes: Record<string, string> = {
@@ -192,15 +269,37 @@ const escapes: Record<string, string> = {
   ">": "&gt;",
   '"': "&quot;",
 };
+const NEEDS_ESCAPE = /[&<>"]/;
 function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => escapes[c]);
+  // Most values have nothing to escape; testing first skips the replace
+  // callback, which the profile showed on every attribute of every request.
+  return NEEDS_ESCAPE.test(s) ? s.replace(/[&<>"]/g, (c) => escapes[c]) : s;
 }
 
 function tag(name: string, attrs: Record<string, string>): string {
-  const a = Object.entries(attrs)
-    .map(([k, v]) => ` ${k}="${esc(v)}"`)
-    .join("");
-  return `<${name}${a}>`;
+  let out = `<${name}`;
+  for (const k in attrs) out += ` ${k}="${esc(attrs[k])}"`;
+  return out + ">";
+}
+
+/**
+ * The asset tags depend only on the asset list, which is fixed for the life of
+ * a server, so they are built once per list rather than on every request.
+ */
+const assetTags = new WeakMap<Assets, { head: string; body: string }>();
+function tagsFor(assets: Assets): { head: string; body: string } {
+  let tags = assetTags.get(assets);
+  if (!tags) {
+    tags = {
+      head: assets.css.map((a) => tag("link", { rel: "stylesheet", href: a.href })).join("") +
+        (assets.preload ?? []).map((a) => tag("link", { rel: "modulepreload", href: a.href }))
+          .join(""),
+      body: assets.js.map((a) => tag("script", { type: "module", src: a.href }) + "</script>")
+        .join(""),
+    };
+    assetTags.set(assets, tags);
+  }
+  return tags;
 }
 
 /** Assemble the HTML document from the page body, head metadata and assets. */
@@ -221,16 +320,14 @@ export function document(body: string, head: Head, assets: Assets): string {
   }
   if (head.image) parts.push(tag("meta", { property: "og:image", content: head.image }));
   for (const link of head.links ?? []) parts.push(tag("link", link));
-  for (const a of assets.css ?? []) parts.push(tag("link", { rel: "stylesheet", href: a.href }));
+  const tags = tagsFor(assets);
+  parts.push(tags.head);
   if (head.jsonLd !== undefined) {
     // `<` escaped so a string value cannot close the script element early.
     const json = JSON.stringify(head.jsonLd).replace(/</g, "\\u003c");
     parts.push(`<script type="application/ld+json">${json}</script>`);
   }
-  const js = (assets.js ?? [])
-    .map((a) => tag("script", { type: "module", src: a.href }) + "</script>")
-    .join("");
   return `<!doctype html><html lang="${esc(head.lang ?? "en")}"><head>${
     parts.join("")
-  }</head><body>${body}${js}</body></html>`;
+  }</head><body>${body}${tags.body}</body></html>`;
 }

@@ -8,8 +8,8 @@ No Vite, no Babel, no esbuild. The bundler, JSX transform and CSS engine are
 all Rust.
 
 ```
-core     ~560 lines   router + render + client + hmr runtime
-drivers  ~490 lines   build + dev + shared driver glue + rolldown plugins
+core     ~670 lines   router + render + client + hmr runtime + app, errors, types
+drivers  ~610 lines   build + dev + cli + shared driver glue + rolldown plugins
 ```
 (code lines, comments and blanks excluded)
 
@@ -44,14 +44,15 @@ npm install        # once: installs the toolchain (rolldown, nitro, lightningcss
 deno task dev      # example app, dev server with HMR on 0.0.0.0:1337
 deno task build    # example app, production build
 
-deno task todo:dev     # the fu-todo example app
-deno task todo:build
-deno task todo:start   # serve its build on :1337
 
 deno task test     # unit tests, no browser
 deno task check    # format, lint, types (framework and both apps), tests
-deno task check:pkg  # build, serve and dev-serve a real app from the packed npm artefact
 ```
+
+The CLI behind those tasks is `fu dev [root] [--port N] [--host H]` and
+`fu build [root]`. The root defaults to the working directory and must contain
+`routes/`. The dev server listens on `--port` (1337) and its HMR socket on the
+port after it; `--host` sets the bind address (0.0.0.0).
 
 Both example apps build against **this checkout's `src/`**, never a published
 package, so the framework and the apps can be changed and tested together
@@ -70,13 +71,24 @@ bun  example/.output/server/index.mjs
 deno run -A example/.output/server/index.mjs
 ```
 
+That holds because `fu build` always uses Nitro's `node-server` preset, whichever
+runtime runs the build. Set `NITRO_PRESET` to build for a specific platform
+instead.
+
+A build minifies the client, serves it from `/_fu/` under content-hashed names
+with a year-long `immutable` cache, pre-compresses it (brotli, gzip, zstd) and
+announces the shared chunks as `modulepreload`, so a page's islands start
+loading in one round trip after the HTML. The dev server serves plain names
+from `/`.
+
 ## Project shape
 
 ```
-app.ts                            middleware chain (optional)
-state.ts                          your State type
-middleware/*.ts                   one concern per file
+app.ts (or app.tsx)               middleware chain (optional)
+state.ts                          your State type (a convention, not scanned)
+middleware/*.ts                   one concern per file (a convention; app.ts imports them)
 routes/_app.tsx                   shell wrapping every page (optional)
+routes/_error.tsx                 error page (optional)
 routes/index.tsx              ->  /
 routes/about.tsx              ->  /about
 routes/blog/[slug].tsx        ->  /blog/:slug
@@ -102,6 +114,11 @@ export default function About(ctx: PageContext) {
 Return a `Response` from a handler to short-circuit; return anything else and
 it lands on `ctx.data`.
 
+Handlers are keyed by HTTP method. A page renders for `GET` and `HEAD` whether
+or not it has a `GET` handler, so a route with only `POST` still shows its form.
+`HEAD` runs the `GET` handler and drops the body. `OPTIONS` is answered for you,
+and any other method without a handler is a 405 carrying `Allow`.
+
 ## Middleware
 
 `app.ts` composes an ordered chain. Registration order is outermost first, so
@@ -115,7 +132,8 @@ const app = new App<State>();
 
 app.use(async (ctx) => {                 // outermost: unwinds last
   const res = await ctx.next();
-  res.headers.set("X-Frame-Options", "SAMEORIGIN");
+  res.headers.set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'");
+  res.headers.set("X-Frame-Options", "DENY");
   return res;
 });
 
@@ -169,15 +187,19 @@ Anything thrown by a handler, a page or a middleware is turned into a response
 rather than reaching the server as an unhandled crash. So are 404 and 405.
 
 ```ts
-import { HttpError } from "@janit/fu";
+import { type Handlers, HttpError } from "@janit/fu";
 
-export const handlers = {
+export const handlers: Handlers<State> = {
   GET(ctx) {
     if (!ctx.state.session) throw new HttpError(403, "Not yours");
     ...
   },
 };
 ```
+
+`HttpError` takes response headers as a third argument —
+`new HttpError(429, "Slow down", { headers: { "retry-after": "30" } })` — and
+they are sent whether or not an error page renders.
 
 An optional `routes/_error.tsx` renders them, receiving `ctx` like any page with
 `ctx.error` set to `{ status, message }`. It is wrapped by `routes/_app.tsx`, so
@@ -234,6 +256,11 @@ export default function Counter({ start = 0 }) {
 }
 ```
 
+Every export of an island file is an island, default or named, so one file can
+hold several. Props travel to the client as JSON: strings, numbers, arrays and
+plain objects cross; a function or JSX element (including JSX `children`) fails
+the render with an error naming the prop, rather than hydrating without it.
+
 ## What works
 
 Routing (static, dynamic and wildcard, via the web-standard `URLPattern`),
@@ -267,7 +294,7 @@ segment count cannot fit the path is skipped. A static hit is ~65 ns and a
 dynamic one ~1.6 µs with 16 routes, down from 28 µs and 57 µs.
 
 See [the design doc](docs/design.md) for
-the full rationale and the nine undocumented traps this implementation encodes.
+the full rationale and the fourteen undocumented traps this implementation encodes.
 
 ## Tests
 
@@ -280,9 +307,9 @@ failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |
 |---|---|
-| router | static beats dynamic beats wildcard; wildcards span segments and match their own base path; params decode, but an escaped `/`, NUL, backslash or dot segment never reaches one; a non-ASCII static route matches its percent-encoded request |
+| router | static beats dynamic beats wildcard, ties broken by the earliest literal segment, never by file order; wildcards span segments and match their own base path; params decode, but an escaped `/`, NUL, backslash or dot segment never reaches one; a non-ASCII static route matches its percent-encoded request |
 | middleware | outer unwinds last and decorates inner short-circuits; `next()` twice rejects; throws propagate |
-| render | head escaping; JSON-LD cannot close its own `<script>`; 404 vs 405; islands get a marker |
+| render | head escaping; JSON-LD cannot close its own `<script>`; 404 vs 405, `Allow`, HEAD and OPTIONS; islands get a marker |
 | errors | a 500 never leaks its message; error responses are uncacheable; a broken error page falls back |
 | plugins | `composes` keeps every class name; CSS output changes with content; the JSX transform never touches rolldown's runtime; the package self-alias |
 | driver | the server entry imports only the optional files that exist; the H3Event unwrap |
@@ -298,8 +325,8 @@ Two public repos ship from this private one, each as a squashed snapshot so no
 private history leaks:
 
 ```sh
-./scripts/publish.sh      --dry-run --tag v0.0.1 "First public release"  # -> janit/fu
-./scripts/publish-todo.sh --dry-run --tag v0.0.1 "First public release"  # -> janit/fu-todo
+./scripts/publish.sh      --dry-run --minor "Describe the release"  # -> janit/fu
+./scripts/publish-todo.sh --dry-run --minor "Describe the release"  # -> janit/fu-todo
 ```
 
 `scripts/publish-lib.sh` holds the mechanics: a baseline exclude list that is
@@ -314,8 +341,18 @@ bare repository by overriding `PUBLIC_REPO`.
 
 ## Known gaps
 
+- HMR works only from the machine running `fu dev`. The dev server is reachable
+  across the network, but its HMR socket accepts pages served from a loopback
+  name only, which is what keeps a DNS-rebinding page from reading your source.
+  A page opened from another machine renders and hydrates, but does not
+  hot-swap.
+- The dev server finds routes and islands once, at start. Editing one
+  rebuilds, but a newly added file needs a restart.
 - **Adding or removing a hook** in an island breaks hook order during HMR. It
   does not crash, but needs a manual refresh.
+- An editor that truncates or renames a file on save can be read mid-save. The
+  island then keeps its previous code (with a console warning) until the next
+  save, rather than crashing.
 - Naming an anonymous `export default () => {}` island shifts source positions,
   so that one module's sourcemap is dropped rather than left wrong.
 - `urlpattern-polyfill` is bundled even on Deno and Bun, which have

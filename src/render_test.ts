@@ -30,6 +30,11 @@ Deno.test("document renders the head fields the shell contract promises", () => 
   assertStringIncludes(html, ">BODY<");
 });
 
+Deno.test("shared chunks are announced as modulepreload", () => {
+  const html = document("", {}, { ...assets, preload: [{ href: "/jsxRuntime-x.js" }] });
+  assertStringIncludes(html, '<link rel="modulepreload" href="/jsxRuntime-x.js">');
+});
+
 Deno.test("head values are escaped so they cannot break out of an attribute", () => {
   const html = document("", { title: '"><script>alert(1)</script>', description: "a & b" }, {
     js: [],
@@ -89,6 +94,58 @@ Deno.test("unmatched is 404 and a wrong method on a matched route is 405", async
   assertEquals((await get(handler, "/nothing-here")).status, 404);
   assertEquals((await get(handler, "/api", "GET")).status, 405);
   assertEquals((await get(handler, "/api", "POST")).status, 201);
+});
+
+Deno.test("a 405 names the methods the route does answer", async () => {
+  const handler = createHandler({ manifest, assets });
+  const res = await get(handler, "/api", "GET");
+  assertEquals(res.status, 405);
+  assertEquals(res.headers.get("allow"), "POST, OPTIONS");
+  assertEquals((await get(handler, "/", "DELETE")).headers.get("allow"), "GET, HEAD, OPTIONS");
+});
+
+Deno.test("a page without handlers renders for GET and HEAD only", async () => {
+  const handler = createHandler({ manifest, assets });
+  const post = await get(handler, "/blog/abc", "POST");
+  assertEquals(post.status, 405);
+  assertEquals(post.headers.get("allow"), "GET, HEAD, OPTIONS");
+  const head = await get(handler, "/blog/abc", "HEAD");
+  assertEquals(head.status, 200);
+  assertEquals(head.headers.get("content-type"), "text/html; charset=utf-8");
+  assertEquals(await head.text(), "");
+});
+
+Deno.test("HEAD runs the GET handler and drops the body, errors included", async () => {
+  const handler = createHandler({ manifest, assets });
+  const res = await get(handler, "/", "HEAD");
+  assertEquals(res.status, 200);
+  assertEquals(await res.text(), "");
+  const missing = await get(handler, "/nothing-here", "HEAD");
+  assertEquals(missing.status, 404);
+  assertEquals(await missing.text(), "");
+});
+
+Deno.test("OPTIONS is answered with the allowed methods", async () => {
+  const res = await get(createHandler({ manifest, assets }), "/api", "OPTIONS");
+  assertEquals(res.status, 204);
+  assertEquals(res.headers.get("allow"), "POST, OPTIONS");
+});
+
+Deno.test("a route that only posts still renders its page on GET", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/form.tsx": () =>
+        Promise.resolve({
+          handlers: { POST: () => new Response(null, { status: 303, headers: { location: "/" } }) },
+          default: () => h("form", null),
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/form");
+  assertEquals(res.status, 200);
+  assertStringIncludes(await res.text(), "<form></form>");
+  assertEquals((await get(handler, "/form", "POST")).status, 303);
 });
 
 Deno.test("a handler returning a Response short-circuits rendering", async () => {
@@ -156,6 +213,32 @@ Deno.test("islands are wrapped in a hydration marker carrying their props", asyn
   assertStringIncludes(html, "<b>7</b>");
 });
 
+Deno.test("an island passed JSX children or a function fails loudly, not on hydrate", async () => {
+  // JSON turns a vnode into an object Preact cannot render, so the client would
+  // hydrate the island with nothing and wipe the server's markup.
+  const Island = (_props: { children?: unknown; onPick?: unknown }) => h("i", null, "x");
+  (Island as unknown as { __island: string }).__island = "/islands/K.tsx";
+  const page = (props: Record<string, unknown>) =>
+    createHandler({
+      manifest: { "/routes/index.tsx": () => Promise.resolve({ default: () => h(Island, props) }) },
+      assets,
+    });
+  const origError = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => logged.push(...a);
+  try {
+    assertEquals((await get(page({ children: h("p", null, "kid") }), "/")).status, 500);
+    assertEquals((await get(page({ onPick: () => {} }), "/")).status, 500);
+  } finally {
+    console.error = origError;
+  }
+  assertStringIncludes(String(logged.find((e) => e instanceof Error)), 'prop "children"');
+  // Plain text children are data and still fine.
+  const ok = await get(page({ children: "just text" }), "/");
+  assertEquals(ok.status, 200);
+  assertStringIncludes(await ok.text(), "just text");
+});
+
 // The error page receives ctx just like a page component does.
 const ErrorPage = (ctx: Ctx) =>
   h("main", { id: "err" }, `${ctx.error?.status}: ${ctx.error?.message}`);
@@ -214,6 +297,39 @@ Deno.test("error pages are noindex and titled by default", async () => {
     .text();
   assertStringIncludes(html, "<title>404 Not Found</title>");
   assertStringIncludes(html, '<meta name="robots" content="noindex">');
+});
+
+Deno.test("the error page does not inherit what the failed page said about itself", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/todo.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.head.title = "Todo 1";
+              ctx.head.canonical = "http://x/todo";
+              ctx.head.jsonLd = { "@type": "Thing" };
+              throw new HttpError(404);
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+    ErrorPage,
+    app: new App().use((ctx) => {
+      ctx.head.lang = "fi";
+      ctx.head.robots = "index, follow";
+      return ctx.next();
+    }),
+  });
+  const html = await (await get(handler, "/todo")).text();
+  assertStringIncludes(html, "<title>404 Not Found</title>");
+  assertStringIncludes(html, '<meta name="robots" content="noindex">');
+  assertStringIncludes(html, '<html lang="fi">');
+  assertEquals(html.includes("Todo 1"), false);
+  assertEquals(html.includes("canonical"), false);
+  assertEquals(html.includes("ld+json"), false);
 });
 
 Deno.test("the error response still travels out through the middleware chain", async () => {

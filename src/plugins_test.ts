@@ -89,13 +89,33 @@ Deno.test("every export form an island can use gets stamped", () => {
   const stamp = (src: string) => run(p, src, "/p/islands/C.tsx")!.code;
   // The regex this replaced only caught `export function`, so an arrow
   // component rendered and then silently never hydrated.
-  assertStringIncludes(stamp("export const A = () => null;"), 'A.__island="/islands/C.tsx"');
+  assertStringIncludes(stamp("export const A = () => null;"), 'A.__island="/islands/C.tsx#A"');
   assertStringIncludes(stamp("export const B = function () { return null; };"), "B.__island");
   assertStringIncludes(stamp("export function D() { return null; }"), "D.__island");
   assertStringIncludes(stamp("export default function E() { return null; }"), "E.__island");
   assertStringIncludes(stamp("const F = () => null; export { F };"), "F.__island");
   assertStringIncludes(stamp("export const G = () => null, H = () => null;"), "G.__island");
   assertStringIncludes(stamp("export const G = () => null, H = () => null;"), "H.__island");
+});
+
+Deno.test("each export is keyed by its exported name, so the client picks the right one", () => {
+  const p = jsx({ stampIslands: true });
+  const stamp = (src: string) => run(p, src, "/p/islands/W.tsx")!.code;
+  const two = stamp("export const Counter = () => null; export const Toggle = () => null;");
+  assertStringIncludes(two, 'Counter.__island="/islands/W.tsx#Counter"');
+  assertStringIncludes(two, 'Toggle.__island="/islands/W.tsx#Toggle"');
+  assertStringIncludes(
+    stamp("const F = () => null; export { F as Fancy };"),
+    'F.__island="/islands/W.tsx#Fancy"',
+  );
+  assertStringIncludes(
+    stamp("const F = () => null; export { F as default };"),
+    'F.__island="/islands/W.tsx"',
+  );
+  assertStringIncludes(
+    stamp("export default function E() { return null; }"),
+    'E.__island="/islands/W.tsx"',
+  );
 });
 
 Deno.test("an anonymous default export is named so it can be stamped", () => {

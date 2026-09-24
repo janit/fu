@@ -22,8 +22,9 @@ class ModuleHotContext {
       throw new Error("Invalid arguments for `import.meta.hot.accept`");
     }
   }
+  /** This module cannot take the update after all. Nothing above it accepts, so reload. */
   invalidate() {
-    socket.send(JSON.stringify({ type: "hmr:invalidate", moduleId: this.moduleId }));
+    location.reload();
   }
 }
 
@@ -84,10 +85,14 @@ async function applyPatch(url, allChangedIds) {
   console.debug("[hmr] applied", selfAccepting.join(", "));
 }
 
+/** The newest stylesheet link inserted, so only it survives a burst of saves. */
+let latestSheet = null;
+
 /**
- * Swap the stylesheet in place. A new <link> is inserted and the old one is
- * only removed once the replacement has loaded, so the page never flashes
- * unstyled.
+ * Swap the stylesheet in place. A new <link> is inserted and the others are
+ * only removed once it has loaded, so the page never flashes unstyled. Two
+ * quick saves can load out of order, so whichever loads removes every sheet
+ * but the newest, and a stale one that loads late removes itself.
  */
 function swapStylesheet(href) {
   const links = [...document.querySelectorAll('link[rel="stylesheet"]')];
@@ -95,8 +100,13 @@ function swapStylesheet(href) {
   const next = document.createElement("link");
   next.rel = "stylesheet";
   next.href = href;
+  latestSheet = next;
+  const path = new URL(href, location.href).pathname;
   next.onload = () => {
-    if (old && old !== next) old.remove();
+    if (next !== latestSheet) return next.remove();
+    for (const l of document.querySelectorAll('link[rel="stylesheet"]')) {
+      if (l !== next && new URL(l.href, location.href).pathname === path) l.remove();
+    }
   };
   (old ? old.parentNode : document.head).insertBefore(next, old ? old.nextSibling : null);
   console.debug("[hmr] css swapped ->", href);

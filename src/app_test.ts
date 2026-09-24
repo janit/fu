@@ -137,3 +137,28 @@ Deno.test("a synchronous throw rejects rather than escaping the chain", async ()
   });
   await assertRejects(() => fromTerminal(ctx()), Error, "terminal boom");
 });
+
+Deno.test("params and data the router writes reach every middleware, however deep", async () => {
+  const seen: string[] = [];
+  const peek = (name: string): Middleware<S> => async (c) => {
+    const res = await c.next();
+    seen.push(`${name}:${c.params.id}:${c.data}`);
+    return res;
+  };
+  const root = ctx();
+  const run = compose<S>([peek("outer"), peek("middle"), peek("inner")], (c) => {
+    c.params = { id: "5" };
+    c.data = "loaded";
+    return new Response("ok");
+  });
+  await run(root);
+  assertEquals(seen, ["inner:5:loaded", "middle:5:loaded", "outer:5:loaded"]);
+  assertEquals(root.params, { id: "5" });
+});
+
+Deno.test("a middleware that returns something other than a Response rejects", async () => {
+  const run = compose<S>([async (c: Ctx<S>) => {
+    await c.next(); // forgot the return
+  }] as unknown as Middleware<S>[], () => new Response("ok"));
+  await assertRejects(() => run(ctx()), Error, "not a Response");
+});

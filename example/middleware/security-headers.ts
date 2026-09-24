@@ -1,8 +1,25 @@
+import process from "node:process";
 import type { Middleware } from "@janit/fu";
 import type { State } from "../state.ts";
 
+/**
+ * Strict, because the framework allows it: every script the shell emits is an
+ * external module with a `src`, and nothing writes an inline `<style>`. The
+ * JSON-LD block is data, not script, so CSP leaves it alone. Only dev needs
+ * more: the HMR socket is on port+1, a different origin.
+ */
+const CSP = [
+  "default-src 'self'",
+  process.env.FU_DEV === "1" ? "connect-src 'self' ws://localhost:*" : "connect-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 const HEADERS: ReadonlyArray<[string, string]> = [
-  ["X-Frame-Options", "SAMEORIGIN"],
+  ["Content-Security-Policy", CSP],
+  // DENY, to say the same as frame-ancestors 'none'.
+  ["X-Frame-Options", "DENY"],
   ["X-Content-Type-Options", "nosniff"],
   ["Referrer-Policy", "strict-origin-when-cross-origin"],
 ];

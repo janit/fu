@@ -68,14 +68,16 @@ interface Node {
   source?: unknown;
   id?: { name?: string };
   declaration?: Node & { declarations?: { id?: { name?: string } }[] };
-  specifiers?: { local?: { name?: string } }[];
+  specifiers?: { local?: { name?: string }; exported?: { name?: string; value?: string } }[];
 }
 
 const NAMED_DECLARATIONS = new Set(["FunctionDeclaration", "ClassDeclaration"]);
 
 /**
  * Mark every exported component so the SSR renderer can spot a hydration
- * boundary from the component function alone.
+ * boundary from the component function alone. The stamp is the island key: the
+ * module id for the default export, `<id>#<name>` for a named one, so the
+ * client hydrates the export the page actually rendered.
  *
  * Uses oxc's parser rather than a regex: `export const X = () => {}` is the
  * most natural way to write a Preact component, and a regex over `export
@@ -93,7 +95,8 @@ export function stampIslands(
 ): { code: string; rewrote: boolean } {
   const parsed = parseSync(id, js, { sourceType: "module", lang: "tsx" });
   const body = (parsed.program as unknown as { body: Node[] }).body ?? [];
-  const names: string[] = [];
+  /** [local binding, exported name] */
+  const stamps: [string, string][] = [];
   let rewrote = false;
   let out = js;
 
@@ -107,13 +110,14 @@ export function stampIslands(
       const decl = node.declaration;
       if (decl?.type === "VariableDeclaration") {
         for (const d of decl.declarations ?? []) {
-          if (d.id?.name) names.push(d.id.name);
+          if (d.id?.name) stamps.push([d.id.name, d.id.name]);
         }
       } else if (decl && NAMED_DECLARATIONS.has(decl.type)) {
-        if (decl.id?.name) names.push(decl.id.name);
+        if (decl.id?.name) stamps.push([decl.id.name, decl.id.name]);
       } else {
         for (const sp of node.specifiers ?? []) {
-          if (sp.local?.name) names.push(sp.local.name);
+          const exported = sp.exported?.name ?? sp.exported?.value ?? sp.local?.name;
+          if (sp.local?.name && exported) stamps.push([sp.local.name, exported]);
         }
       }
       continue;
@@ -122,7 +126,7 @@ export function stampIslands(
     if (node.type === "ExportDefaultDeclaration") {
       const decl = node.declaration;
       if (decl && NAMED_DECLARATIONS.has(decl.type) && decl.id?.name) {
-        names.push(decl.id.name);
+        stamps.push([decl.id.name, "default"]);
       } else if (decl) {
         // `export default <expression>` — give it a name so it can be stamped.
         const head = js.slice(node.start, decl.start);
@@ -130,19 +134,26 @@ export function stampIslands(
           out = out.slice(0, node.start) +
             head.replace("export default", "const __fu_default =") +
             out.slice(decl.start);
-          names.push("__fu_default");
+          stamps.push(["__fu_default", "default"]);
           rewrote = true;
         }
       }
     }
   }
 
-  if (names.length === 0) return { code: out, rewrote };
-  const tail = names
-    .map((n) => `try{${n}.__island=${JSON.stringify(key)}}catch{}`)
+  if (stamps.length === 0) return { code: out, rewrote };
+  const tail = stamps
+    .map(([local, exported]) =>
+      `try{${local}.__island=${JSON.stringify(islandKey(key, exported))}}catch{}`
+    )
     .join("\n");
   const reexport = rewrote ? "\nexport default __fu_default;" : "";
   return { code: `${out}${reexport}\n${tail}\n`, rewrote };
+}
+
+/** `/islands/C.tsx` for the default export, `/islands/C.tsx#Name` for a named one. */
+export function islandKey(file: string, exported: string): string {
+  return exported === "default" ? file : `${file}#${exported}`;
 }
 
 /** Accept our own updates so rolldown patches the module instead of reloading. */
@@ -162,7 +173,7 @@ function acceptSelf(key: string): string {
  * Pair this with `moduleTypes: { ".css": "js" }`, or rolldown classifies the
  * module by extension and refuses to bundle it.
  */
-export function css(collected: Map<string, string>): Plugin {
+export function css(collected: Map<string, string>, onChange?: () => void): Plugin {
   return {
     name: "fu:css",
     transform: {
@@ -176,7 +187,9 @@ export function css(collected: Map<string, string>): Plugin {
           cssModules: isModule,
         });
         const text = out.code.toString();
+        const changed = collected.get(id) !== text;
         collected.set(id, text);
+        if (changed) onChange?.();
         // The emitted JS must change when the stylesheet does. Class names hash
         // from the *filename*, so without this stamp an edit produces
         // byte-identical JS, rolldown correctly emits no update, and CSS HMR

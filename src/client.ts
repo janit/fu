@@ -41,6 +41,19 @@ function proxyFor(key: string, impl: FunctionComponent<Props>): IslandProxy {
   return entry;
 }
 
+type IslandModule = Record<string, unknown>;
+
+/** `/islands/W.tsx#Toggle` -> ["/islands/W.tsx", "Toggle"]; no `#` means the default export. */
+function splitKey(key: string): [file: string, name: string] {
+  const i = key.indexOf("#");
+  return i === -1 ? [key, "default"] : [key.slice(0, i), key.slice(i + 1)];
+}
+
+function componentOf(mod: IslandModule, name: string): FunctionComponent<Props> | null {
+  const c = mod[name];
+  return typeof c === "function" ? c as FunctionComponent<Props> : null;
+}
+
 /**
  * Hydrate every `[data-island]` marker the server rendered.
  *
@@ -49,21 +62,26 @@ function proxyFor(key: string, impl: FunctionComponent<Props>): IslandProxy {
  * network round-trip per island.
  */
 export async function hydrateIslands(
-  manifest: Record<string, () => Promise<{ default: FunctionComponent<Props> }>>,
+  manifest: Record<string, () => Promise<IslandModule>>,
 ): Promise<void> {
   const els = [...document.querySelectorAll<HTMLElement>("[data-island]")];
-  const keys = [...new Set(els.map((el) => el.dataset.island!))];
-  const loaded = new Map(
-    await Promise.all(keys.map(async (key) => {
-      const loader = manifest[key];
-      if (!loader) console.warn("[fu] no island module for", key);
-      return [key, loader ? (await loader()).default : null] as const;
+  const files = [...new Set(els.map((el) => splitKey(el.dataset.island!)[0]))];
+  const modules = new Map(
+    await Promise.all(files.map(async (file) => {
+      const loader = manifest[file];
+      if (!loader) console.warn("[fu] no island module for", file);
+      return [file, loader ? await loader() : null] as const;
     })),
   );
   for (const el of els) {
     const key = el.dataset.island!;
-    const impl = loaded.get(key);
-    if (!impl) continue;
+    const [file, name] = splitKey(key);
+    const mod = modules.get(file);
+    const impl = mod && componentOf(mod, name);
+    if (!impl) {
+      if (mod) console.warn(`[fu] ${file} has no component exported as ${name}`);
+      continue;
+    }
     const props = JSON.parse(el.dataset.props || "{}") as Props;
     hydrate(h(proxyFor(key, impl).Component, props), el);
     const list = mounted.get(key) ?? [];
@@ -75,15 +93,22 @@ export async function hydrateIslands(
 
 /** Exposed for the HMR runtime to call after a module is hot-swapped. */
 function installHmrHook(): void {
-  (globalThis as Record<string, unknown>).__fu_hmr__ = (
-    key: string,
-    mod: { default: FunctionComponent<Props> },
-  ): void => {
-    const list = mounted.get(key);
-    if (!list?.length) return;
-    const { Component } = proxyFor(key, mod.default);
+  (globalThis as Record<string, unknown>).__fu_hmr__ = (file: string, mod: IslandModule): void => {
     const stamp = ++hmrVersion;
-    for (const { el, props } of list) render(h(Component, { ...props, __hmr: stamp }), el);
-    console.debug(`[fu] hmr: re-rendered ${list.length}x ${key}`);
+    for (const [key, list] of mounted) {
+      const [keyFile, name] = splitKey(key);
+      if (keyFile !== file || !list.length) continue;
+      // A save that truncates or renames the file first can be picked up
+      // half-written, with the export missing. Swapping that in would make the
+      // proxy call undefined; keep the old implementation until a whole one lands.
+      const impl = componentOf(mod, name);
+      if (!impl) {
+        console.warn(`[fu] hmr: ${file} has no ${name} export right now; keeping the old one`);
+        continue;
+      }
+      const { Component } = proxyFor(key, impl);
+      for (const { el, props } of list) render(h(Component, { ...props, __hmr: stamp }), el);
+      console.debug(`[fu] hmr: re-rendered ${list.length}x ${key}`);
+    }
   };
 }

@@ -12,11 +12,14 @@ import type { RouteError } from "./types.ts";
  */
 export class HttpError extends Error {
   readonly status: number;
+  /** Sent on the error response, e.g. `Allow`, `Retry-After`, `WWW-Authenticate`. */
+  readonly headers?: Headers;
 
-  constructor(status: number, message?: string) {
+  constructor(status: number, message?: string, init?: { headers?: HeadersInit }) {
     super(message ?? statusText(status));
     this.name = "HttpError";
     this.status = status;
+    if (init?.headers) this.headers = new Headers(init.headers);
   }
 }
 
@@ -50,7 +53,9 @@ export function statusText(status: number): string {
  */
 export function toRouteError(err: unknown): RouteError {
   if (err instanceof HttpError) {
-    return { status: err.status, message: err.message, cause: err };
+    return err.headers
+      ? { status: err.status, message: err.message, headers: err.headers, cause: err }
+      : { status: err.status, message: err.message, cause: err };
   }
   const status = (err as { status?: unknown } | null)?.status;
   if (typeof status === "number" && status >= 400 && status <= 599) {

@@ -9,6 +9,13 @@ Deno.test("HttpError carries a status and a default message", () => {
   assertEquals(e instanceof Error, true);
 });
 
+Deno.test("HttpError can carry response headers through to the error", () => {
+  const e = new HttpError(429, undefined, { headers: { "retry-after": "30" } });
+  assertEquals(e.headers?.get("retry-after"), "30");
+  assertEquals(toRouteError(e).headers?.get("retry-after"), "30");
+  assertEquals(new HttpError(404).headers, undefined);
+});
+
 Deno.test("statusText falls back sensibly for unknown codes", () => {
   assertEquals(statusText(404), "Not Found");
   assertEquals(statusText(599), "Internal Server Error");

@@ -16,6 +16,7 @@ export type {
   Assets,
   Ctx,
   FuOptions,
+  Handlers,
   Head,
   Middleware,
   PageContext,

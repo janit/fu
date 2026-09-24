@@ -1,5 +1,6 @@
 import type { ShellProps } from "@janit/fu";
 import type { State } from "../state.ts";
+import styles from "./shell.module.css";
 
 /**
  * Wraps every page. `<head>` is assembled by the framework from ctx.head, so
@@ -7,7 +8,7 @@ import type { State } from "../state.ts";
  */
 export default function Shell({ ctx, children }: ShellProps<State>) {
   return (
-    <div class="shell">
+    <div class={styles.shell}>
       <header>
         <a href="/">Fresh Urquell</a>
         <small>tenant: {ctx.state.tenant} · req: {ctx.state.requestId}</small>

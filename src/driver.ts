@@ -42,10 +42,14 @@ const PACKAGE_NAME = ((): string | null => {
 })();
 
 /** Plugins every bundle of app code needs, client and server alike. */
-function shared(sheets: Map<string, string>, jsxOpts: Parameters<typeof jsx>[0]) {
+function shared(
+  sheets: Map<string, string>,
+  jsxOpts: Parameters<typeof jsx>[0],
+  onCss?: () => void,
+) {
   return [
     ...(PACKAGE_NAME ? [selfAlias(PACKAGE_NAME, HERE, EXT)] : []),
-    css(sheets),
+    css(sheets, onCss),
     jsx(jsxOpts),
   ];
 }
@@ -77,6 +81,11 @@ export interface Project {
 
 export function scanProject(root: string): Project {
   root = path.resolve(root);
+  // Without this a mistyped root builds an app with no routes, which serves a
+  // 404 for everything and says nothing about why.
+  if (!fs.existsSync(path.join(root, "routes"))) {
+    throw new Error(`no routes/ directory in ${root}; is that the project root?`);
+  }
   return {
     root,
     routeFiles: walk(root, "routes"),
@@ -145,11 +154,14 @@ export function clientInput(
  * Nitro options both drivers share. `serverDir` is the generated dir, never the
  * project root, or nitro claims `routes/` as its own server routes and shadows
  * the catch-all. Islands are imported on the server too, so SSR needs the same
- * CSS and JSX handling as the client.
+ * CSS and JSX handling as the client. Stylesheets a route or the shell imports
+ * are seen only here, so the caller passes the map the client's sheets go to.
  */
 export function nitroOptions(
   project: Project,
   ssrEntry: string,
+  sheets: Map<string, string> = new Map(),
+  onCss?: () => void,
 ): Parameters<typeof createNitro>[0] {
   return {
     rootDir: project.root,
@@ -158,10 +170,43 @@ export function nitroOptions(
     publicAssets: [{ dir: project.clientDir, baseURL: "/" }],
     handlers: [{ route: "/**", handler: ssrEntry, format: "web", lazy: false }],
     rollupConfig: {
-      plugins: shared(new Map(), { stampIslands: true }),
+      plugins: shared(sheets, { stampIslands: true }, onCss),
       moduleTypes: { ".css": "js" },
     },
   } as Parameters<typeof createNitro>[0];
+}
+
+/**
+ * Server-side entry points: every route plus the shell, error page and app.
+ * Their imports reach CSS the client bundle never sees.
+ */
+export function serverEntries(project: Project): string[] {
+  return [
+    ...project.routeFiles.map((f) => path.join(project.root, f)),
+    ...[project.shellPath, project.errorPath, project.appPath].filter((f): f is string => !!f),
+  ];
+}
+
+/** Resolve bare specifiers as external: a pass that only collects CSS need not bundle packages. */
+export const externalPackages = {
+  name: "fu:external-packages",
+  resolveId(id: string, importer?: string) {
+    if (!importer || id.startsWith("\0") || /^[./]/.test(id) || path.isAbsolute(id)) return null;
+    if (/\.css(\?|$)/.test(id)) return null;
+    return { id, external: true };
+  },
+};
+
+/** Rolldown input for a pass over the server entries that only collects their CSS. */
+export function cssInput(project: Project, sheets: Map<string, string>): InputOptions {
+  return {
+    input: serverEntries(project),
+    // After selfAlias, so the framework itself still resolves to its files.
+    plugins: [...shared(sheets, {}), externalPackages],
+    platform: "node",
+    moduleTypes: { ".css": "js" },
+    logLevel: "silent",
+  };
 }
 
 /** Concatenate collected stylesheets into one file; hashed unless a name is given. */
