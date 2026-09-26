@@ -65,7 +65,7 @@
   },
   "devDependencies": {
     "@preact/signals": "^2.11.2",
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.2",
     "preact": "11.0.0-rc.2",
     "typescript": "^7.0.2"
   },
