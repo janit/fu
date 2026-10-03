@@ -5,6 +5,7 @@ import type { createNitro } from "nitro/builder";
 import type { InputOptions } from "rolldown";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { css, hash, jsx, selfAlias, virtual } from "./plugins.ts";
 import type { Assets } from "./types.ts";
 
@@ -65,9 +66,15 @@ export const strictImports = {
   onLog(
     this: { error(message: string): never },
     _level: string,
-    log: { code?: string; message: string },
+    log: { code?: string; message: string; id?: string },
   ) {
-    if (log.code === "UNRESOLVED_IMPORT") this.error(log.message);
+    if (log.code !== "UNRESOLVED_IMPORT") return;
+    // Only the app's own imports. A dependency's unresolved optional import
+    // (nitro's dev runtime has one) stays what it was: external, and its
+    // business.
+    const importer = log.id ?? / in (\S+)\s*$/m.exec(log.message)?.[1] ?? "";
+    if (/(^|[\\/])node_modules[\\/]/.test(importer)) return;
+    this.error(log.message);
   },
 };
 
@@ -288,6 +295,16 @@ export function bootModule(project: Pick<Project, "root" | "islandFiles">): stri
  * read a body — but has no json()/text()/formData(). The real Request is
  * `event.req`.
  */
+/**
+ * Where nitro's h3 lives, as a path. The generated entry sits in the app,
+ * which does not depend on nitro: by name it resolves only where packages are
+ * hoisted (npm), not under Deno's or pnpm's layout. Resolved from here, where
+ * nitro is a dependency, it is also the copy nitro's own runtime uses.
+ */
+function nitroH3(): string {
+  return fileURLToPath(import.meta.resolve("nitro/h3"));
+}
+
 export interface EntryOptions {
   /** Dev only: the Host names to answer to. Omit to answer to any. */
   hosts?: readonly string[];
@@ -308,7 +325,7 @@ export function ssrModule(
   const present = optionalImports.filter(([, file]) => file);
   return [
     `import { createHandler${hosts ? ", onlyHosts" : ""} } from ${JSON.stringify(runtime.render)};`,
-    ...(assetsPrefix ? [`import { HTTPError } from "nitro/h3";`] : []),
+    ...(assetsPrefix ? [`import { HTTPError } from ${JSON.stringify(nitroH3())};`] : []),
     ...present.map(([name, file]) => `import ${name} from ${JSON.stringify(file)};`),
     `const manifest = {`,
     project.routeFiles.map((f) => "  " + lazyImport(project.root, f)).join(",\n"),

@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { mergeSheets, optional, scanProject, ssrModule, walk } from "./driver.ts";
+import { mergeSheets, optional, scanProject, ssrModule, strictImports, walk } from "./driver.ts";
 
 const tmp = await Deno.makeTempDir();
 const assets = { js: [], css: [] };
@@ -129,8 +129,29 @@ Deno.test("the built entry leaves everything under the asset prefix to nitro", (
   // renders itself escapes that, so the entry raises one instead of routing.
   const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
   const built = ssrModule(project, assets, { assetsPrefix: "/_fu/" });
-  assertStringIncludes(built, 'import { HTTPError } from "nitro/h3";');
+  // By path, not by name: the app does not depend on nitro, so under a strict
+  // node_modules layout (Deno's, pnpm's) "nitro/h3" resolves only from here.
+  const from = built.match(/import \{ HTTPError \} from "([^"]+)";/)?.[1] ?? "";
+  assertEquals([from.startsWith("/"), from.includes("nitro")], [true, true], from);
   assertStringIncludes(built, 'path === "/_fu" || path.startsWith("/_fu/")');
   assertStringIncludes(built, '"cache-control": "no-store"');
   assertEquals(ssrModule(project, assets).includes("HTTPError"), false);
+});
+
+Deno.test("an unresolved import fails the build only when the app wrote it", () => {
+  const errors: string[] = [];
+  const onLog = (log: { code?: string; message: string; id?: string }) =>
+    strictImports.onLog.call({ error: (m: string) => errors.push(m) as never }, "warn", log);
+  onLog({ code: "UNRESOLVED_IMPORT", message: "Could not resolve 'x' in routes/a.tsx" });
+  onLog({ code: "UNRESOLVED_IMPORT", message: "no", id: "/p/routes/b.tsx" });
+  // A dependency's own optional import (nitro's dev runtime has one) is its
+  // business: rolldown leaves it external, as it always did.
+  onLog({
+    code: "UNRESOLVED_IMPORT",
+    message:
+      "Could not resolve 'pathe' in node_modules/.store/nitro@3/node_modules/nitro/dist/x.mjs",
+  });
+  onLog({ code: "UNRESOLVED_IMPORT", message: "no", id: "/p/node_modules/nitro/dist/x.mjs" });
+  onLog({ code: "EMPTY_BUNDLE", message: "fine" });
+  assertEquals(errors, ["Could not resolve 'x' in routes/a.tsx", "no"]);
 });
