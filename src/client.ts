@@ -1,5 +1,12 @@
 import { type ComponentType, type FunctionComponent, h, hydrate, render } from "preact";
 
+/**
+ * Replaced by the driver: true in the dev client, false in a build. Everything
+ * that exists only for hot swapping sits behind it, so a build's minifier
+ * drops it and a production page hydrates each island directly.
+ */
+declare const __FU_HMR__: boolean;
+
 type Props = Record<string, unknown>;
 
 interface Mounted {
@@ -102,25 +109,29 @@ export async function hydrateIslands(
     let props: Props;
     try {
       props = JSON.parse(el.dataset.props || "{}") as Props;
-      hydrate(h(proxyFor(key, impl).Component, props), el);
+      hydrate(h(__FU_HMR__ ? proxyFor(key, impl).Component : impl, props), el);
     } catch (err) {
       console.error(`[fu] ${key} failed to hydrate`, err);
       continue;
     }
-    const list = mounted.get(key) ?? [];
-    list.push({ el, props });
-    mounted.set(key, list);
+    if (__FU_HMR__) {
+      const list = mounted.get(key) ?? [];
+      list.push({ el, props });
+      mounted.set(key, list);
+    }
   }
-  installHmrHook();
+  if (__FU_HMR__) installHmrHook();
 }
 
 /** Exposed for the HMR runtime to call after a module is hot-swapped. */
 function installHmrHook(): void {
   (globalThis as Record<string, unknown>).__fu_hmr__ = (file: string, mod: IslandModule): void => {
     const stamp = ++hmrVersion;
+    let own = false;
     for (const [key, list] of mounted) {
       const [keyFile, name] = splitKey(key);
       if (keyFile !== file || !list.length) continue;
+      own = true;
       // A save that truncates or renames the file first can be picked up
       // half-written, with the export missing. Swapping that in would make the
       // proxy call undefined; keep the old implementation until a whole one lands.
@@ -133,5 +144,13 @@ function installHmrHook(): void {
       for (const { el, props } of list) render(h(Component, { ...props, __hmr: stamp }), el);
       console.debug(`[fu] hmr: re-rendered ${list.length}x ${key}`);
     }
+    if (own) return;
+    // Not mounted itself, so it is only ever rendered inside other islands,
+    // and they hold the old module. A patch carries the changed module alone,
+    // so the ones that import it cannot be run again: reload.
+    // The server renders it too and rebuilds in a couple of hundred
+    // milliseconds; reloading sooner would hydrate new code over old markup.
+    console.debug(`[fu] hmr: ${file} is nested in another island; reloading`);
+    setTimeout(() => location.reload(), 500);
   };
 }

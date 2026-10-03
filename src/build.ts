@@ -18,23 +18,6 @@ import type { FuOptions } from "./types.ts";
 /** URL prefix of the built client files. */
 const ASSETS = "/_fu/";
 
-/**
- * Nitro turns the assets' max-age into a route rule on everything under the
- * prefix, applied after the app answers. The bare prefix itself is not a file,
- * so nitro hands it to the app, whose 404 would then be cached for a year. An
- * exact rule outranks the wildcard.
- *
- * What this cannot reach: a non-GET request under the prefix also falls to the
- * app, and its 404 or 405 leaves with the assets' header. Rules match on path
- * alone and are applied last, so nothing the app sets survives; no cache stores
- * a response to POST, which is why it is left at that.
- */
-export function cacheRules(): Record<string, { headers: Record<string, string> }> {
-  return Object.fromEntries(
-    [ASSETS, ASSETS.slice(0, -1)].map((p) => [p, { headers: { "cache-control": "no-store" } }]),
-  );
-}
-
 export async function build(opts: FuOptions): Promise<void> {
   const project = scanProject(opts.root);
   const outDir = opts.outDir ? path.resolve(opts.outDir) : path.join(project.root, ".output");
@@ -98,7 +81,7 @@ export async function build(opts: FuOptions): Promise<void> {
         return file.startsWith("/islands/") ? [[file, ASSETS + o.fileName]] : [];
       }),
     ),
-  });
+  }, { assetsPrefix: ASSETS });
   const nitro = await createNitro({
     ...nitroOptions(project, ssrEntry),
     // Nitro would pick a preset from whichever runtime runs the build, and its
@@ -112,7 +95,9 @@ export async function build(opts: FuOptions): Promise<void> {
     // dir mounted below the root (one at `/` falls through to the app), hence
     // the prefix. Dev names are not hashed, so dev keeps serving from `/`.
     publicAssets: [{ dir: project.clientDir, baseURL: ASSETS, maxAge: 31536000 }],
-    routeRules: cacheRules(),
+    // That max-age becomes a route rule on everything under the prefix, set
+    // after the handler answers, so the generated entry refuses to answer
+    // there at all (see ssrModule).
     compressPublicAssets: true,
   });
   await copyPublicAssets(nitro);

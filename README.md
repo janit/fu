@@ -253,9 +253,10 @@ Two things the framework does for you:
 - **No failure the framework renders is cacheable.** Its error responses carry
   `no-store`, and the error page adds `<meta name="robots" content="noindex">`
   (the plain-text fallback has no such tag). During a deploy a valid URL can
-  404 for a few seconds, and a shared cache would pin that. The exception is a
-  missing file under `/_fu/`: Nitro answers that itself, as JSON with no cache
-  header, and it never reaches your middleware or error page.
+  404 for a few seconds, and a shared cache would pin that. One place is not
+  yours: everything under `/_fu/` belongs to the built client files. A path
+  there that is not a file gets a JSON 404 from Nitro and never reaches your
+  routes, middleware or error page.
 
 Errors from a handler or a page are caught at the route boundary and returned
 *through* the middleware chain, so security headers and logging middleware still
@@ -305,7 +306,8 @@ plain objects cross; a function or JSX element (including JSX `children`) fails
 the render with an error naming the prop, rather than hydrating without it.
 
 An island rendered inside another island is part of the outer one: it hydrates
-with it and gets no boundary of its own. A class component works as an island,
+with it and gets no boundary of its own, so editing it in dev reloads the page
+rather than hot-swapping. A class component works as an island,
 but its state does not survive a hot swap the way hook state does. Islands
 hydrate independently, so one that throws is reported in the console and the
 rest of the page still works.
@@ -356,7 +358,10 @@ the full rationale and the fourteen undocumented traps this implementation encod
 deno task test
 ```
 
-`deno test` over the whole workspace, no browser needed. The framework suite is written against the
+`deno test` over the whole workspace, no browser needed. What only a browser
+can show (islands hydrating, hot swaps keeping state, stylesheets swapping) is
+`deno task check:browser`, which drives headless Chromium through a build and
+through the dev server while editing files under it. The framework suite is written against the
 failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |
@@ -385,11 +390,6 @@ escaped the chain entirely instead of rejecting.
   compressing proxy in front, or compress in a middleware.
 - The dev server's memory grows with every save, inside nitro and rolldown, by
   a megabyte or a few. Restart it in a long session.
-- A stylesheet whose `import` was removed stays in the dev `/style.css` until
-  the dev server restarts. A build has no such leftovers.
-- A request under `/_fu/` with a method other than GET or HEAD is answered by
-  the app, and Nitro puts the assets' year-long cache header on that 404 or
-  405. No cache stores a response to such a method, so it is left alone.
 - The package exports more than the documented API. `App`, `HttpError`,
   `statusText` and the types `Handlers`, `Middleware`, `PageContext` and
   `ShellProps` (the props of `routes/_app.tsx`: `{ ctx, children }`) are the

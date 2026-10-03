@@ -175,6 +175,8 @@ export function clientInput(
       strictImports,
     ],
     platform: "browser",
+    // See client.ts: the hot-swap machinery is compiled out of a build.
+    transform: { define: { __FU_HMR__: String(hmr) } },
     // rolldown types modules by extension and refuses to bundle CSS; css()
     // has already replaced their contents with JS.
     moduleTypes: { ".css": "js" },
@@ -286,11 +288,17 @@ export function bootModule(project: Pick<Project, "root" | "islandFiles">): stri
  * read a body — but has no json()/text()/formData(). The real Request is
  * `event.req`.
  */
+export interface EntryOptions {
+  /** Dev only: the Host names to answer to. Omit to answer to any. */
+  hosts?: readonly string[];
+  /** Build only: the URL prefix the client files are served under, e.g. "/_fu/". */
+  assetsPrefix?: string;
+}
+
 export function ssrModule(
   project: Pick<Project, "root" | "routeFiles" | "appPath" | "shellPath" | "errorPath">,
   assets: Assets,
-  /** Dev only: the Host names to answer to. Omit to answer to any. */
-  hosts?: readonly string[],
+  { hosts, assetsPrefix }: EntryOptions = {},
 ): string {
   const optionalImports: [name: string, file: string | null][] = [
     ["app", project.appPath],
@@ -300,6 +308,7 @@ export function ssrModule(
   const present = optionalImports.filter(([, file]) => file);
   return [
     `import { createHandler${hosts ? ", onlyHosts" : ""} } from ${JSON.stringify(runtime.render)};`,
+    ...(assetsPrefix ? [`import { HTTPError } from "nitro/h3";`] : []),
     ...present.map(([name, file]) => `import ${name} from ${JSON.stringify(file)};`),
     `const manifest = {`,
     project.routeFiles.map((f) => "  " + lazyImport(project.root, f)).join(",\n"),
@@ -309,7 +318,24 @@ export function ssrModule(
       present.map(([n]) => `, ${n}`).join("")
     } })${hosts ? `, ${JSON.stringify(hosts)})` : ""};`,
     `const toRequest = (input) => input instanceof Request ? input : (input?.req ?? input);`,
-    `export default (input) => handler(toRequest(input));`,
+    ...(assetsPrefix
+      ? [
+        // A request only gets here under the asset prefix when no such file
+        // exists. Nitro's route rule would put the assets' year-long max-age
+        // on whatever the app answered, after it answered; an error nitro
+        // renders itself is the one response that rule does not reach.
+        `const underAssets = (path) => path === ${
+          JSON.stringify(assetsPrefix.replace(/\/$/, ""))
+        } || path.startsWith(${JSON.stringify(assetsPrefix)});`,
+        `export default (input) => {`,
+        `  const req = toRequest(input);`,
+        `  if (underAssets(new URL(req.url).pathname)) {`,
+        `    throw new HTTPError({ status: 404, headers: { "cache-control": "no-store" } });`,
+        `  }`,
+        `  return handler(req);`,
+        `};`,
+      ]
+      : [`export default (input) => handler(toRequest(input));`]),
     ``,
   ].join("\n");
 }
@@ -322,10 +348,10 @@ export function ssrModule(
 export function writeSsrEntry(
   project: Project,
   assets: Assets,
-  hosts?: readonly string[],
+  opts?: EntryOptions,
 ): string {
   emptyDir(project.genDir);
   const file = path.join(project.genDir, "ssr.ts");
-  fs.writeFileSync(file, ssrModule(project, assets, hosts));
+  fs.writeFileSync(file, ssrModule(project, assets, opts));
   return file;
 }

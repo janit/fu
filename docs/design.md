@@ -307,12 +307,14 @@ Each of these cost real debugging and none is documented upstream:
     `/`: one at the root falls through to the app and gets no cache header.
     Hence the build serves its hashed client files from `/_fu/`. That header
     is a route rule applied after the app answers, so the bare `/_fu/`, which
-    falls through to the app's 404, needs an exact rule to override it. Rules
-    match on path alone and are set last (h3's `headers` rule writes them in a
-    `finally`), so a non-GET request under the prefix, which also falls to
-    the app, still leaves with the assets' header; nothing the app or the
-    generated entry does to the response survives. A missing file on GET is
-    answered by Nitro's static handler as a JSON 404 with no cache header.
+    falls through to the app's 404, would be cached for a year, and so would
+    the app's answer to any non-GET request there. Rules match on path alone
+    and are set last (h3's `headers` rule writes them in a `finally`), so
+    nothing the app puts on its response survives. The one response the rule
+    does not reach is an error nitro renders itself, so the generated entry
+    throws an h3 `HTTPError` 404 with `no-store` for every path under the
+    prefix instead of routing it. A missing file on GET never gets that far:
+    nitro's static handler answers it, as a JSON 404 with no cache header.
 14. Nitro writes into the output dir without clearing it, so earlier builds'
     hashed assets and another preset's `deno.json` ship along. The build
     removes the default `.output` first, and a custom `outDir` when it holds
@@ -416,7 +418,7 @@ inference and stays.
 
 ## Versions
 
-Preact 11 (`^11.0.0-rc.2`, which takes 11.0), `@preact/signals` 2.11, Nitro 3 beta,
+Preact 11 (`^11.0.0`), `@preact/signals` 2.11, Nitro 3 beta,
 rolldown 1.2, lightningcss 1.33. rolldown's `devMode` is marked "not ready for
 public usage"; instability here is accepted deliberately.
 

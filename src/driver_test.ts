@@ -115,10 +115,22 @@ Deno.test("the server's stylesheets come first, in dev and in a build alike", ()
 
 Deno.test("the dev entry guards the Host header, the built one does not", () => {
   const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
-  const dev = ssrModule(project, assets, ["localhost", "127.0.0.1"]);
+  const dev = ssrModule(project, assets, { hosts: ["localhost", "127.0.0.1"] });
   assertStringIncludes(
     dev,
     'onlyHosts(createHandler({ manifest, assets }), ["localhost","127.0.0.1"])',
   );
   assertEquals(ssrModule(project, assets).includes("onlyHosts"), false);
+});
+
+Deno.test("the built entry leaves everything under the asset prefix to nitro", () => {
+  // Nitro puts the hashed assets' year-long max-age on whatever the app
+  // answers under the prefix, after the app has answered. Only an error nitro
+  // renders itself escapes that, so the entry raises one instead of routing.
+  const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
+  const built = ssrModule(project, assets, { assetsPrefix: "/_fu/" });
+  assertStringIncludes(built, 'import { HTTPError } from "nitro/h3";');
+  assertStringIncludes(built, 'path === "/_fu" || path.startsWith("/_fu/")');
+  assertStringIncludes(built, '"cache-control": "no-store"');
+  assertEquals(ssrModule(project, assets).includes("HTTPError"), false);
 });

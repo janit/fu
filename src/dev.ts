@@ -95,6 +95,22 @@ export function deliverUpdates(
   }
 }
 
+/**
+ * The client's sheets that are still imported. The dev engine reports patches,
+ * never its module graph, so the client collection keeps a sheet whose import
+ * was removed. The server build does prune (see `css`), and it sees every
+ * island a route renders: a sheet it once held and holds no longer is stale.
+ * `seen` remembers what the server has held, across calls.
+ */
+export function liveClientSheets(
+  server: ReadonlyMap<string, string>,
+  client: ReadonlyMap<string, string>,
+  seen: Set<string>,
+): Map<string, string> {
+  for (const id of server.keys()) seen.add(id);
+  return new Map([...client].filter(([id]) => server.has(id) || !seen.has(id)));
+}
+
 /** Addresses that mean "every interface", where any Host name may be legitimate. */
 const ANY = new Set(["0.0.0.0", "::", "[::]"]);
 
@@ -118,7 +134,13 @@ export async function dev(opts: FuOptions): Promise<void> {
   const clientSheets = new Map<string, string>();
   const peers = new Map<string, { send(data: string): void }>();
   let cssVersion = 0;
-  const flushCss = () => writeSheets(clientDir, [serverSheets, clientSheets], "style.css");
+  const serverSeen = new Set<string>();
+  const flushCss = () =>
+    writeSheets(
+      clientDir,
+      [serverSheets, liveClientSheets(serverSheets, clientSheets, serverSeen)],
+      "style.css",
+    );
   const cssHref = () => `/style.css?v=${++cssVersion}`;
 
   // `implement` takes the runtime SOURCE, not a path — a path gets inlined
@@ -137,6 +159,10 @@ export async function dev(opts: FuOptions): Promise<void> {
     { dir: clientDir, format: "esm", entryFileNames: "[name].js", chunkFileNames: "[name].js" },
     {
       watch: { enabled: true },
+      // A patch updates the open page, not the bundle on disk. Without a
+      // rebuild after it, the next reload would hydrate the page's new markup
+      // with the code from before the edit.
+      rebuildStrategy: "always",
       onOutput(o) {
         if (o instanceof Error) return console.error("[fu] client build failed:", o.message);
         flushCss();
@@ -204,7 +230,7 @@ export async function dev(opts: FuOptions): Promise<void> {
   const ssrEntry = writeSsrEntry(
     project,
     { js: [{ href: "/boot.js" }], css: [{ href: "/style.css" }] },
-    ANY.has(hostname) ? undefined : [...LOOPBACK, hostname],
+    { hosts: ANY.has(hostname) ? undefined : [...LOOPBACK, hostname] },
   );
   // CSS that only a route or the shell imports is seen by the server build
   // alone, so that build flushes /style.css too, and tells every open page:

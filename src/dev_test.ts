@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { deliverUpdates, hmrOriginAllowed, hmrUpgrade } from "./dev.ts";
+import { deliverUpdates, hmrOriginAllowed, hmrUpgrade, liveClientSheets } from "./dev.ts";
 
 Deno.test("the HMR socket admits the dev server's own pages", () => {
   for (const origin of ["http://localhost:1337", "http://127.0.0.1:1337", "http://[::1]:1337"]) {
@@ -74,4 +74,21 @@ Deno.test("an update is written, sent, and only then reported as delivered", () 
     "delivered p3.js",
     "b fu:css",
   ]);
+});
+
+Deno.test("a sheet the server stopped importing is dropped from the client's too", () => {
+  // The client engine only reports patches, never its module graph, so its
+  // collection cannot tell that an import was removed. The server build can.
+  const seen = new Set<string>();
+  const server = new Map([["/islands/i.css", ".i{}"], ["/routes/r.css", ".r{}"]]);
+  const client = new Map([["/islands/i.css", ".i{}"], ["/islands/lone.css", ".l{}"]]);
+  assertEquals([...liveClientSheets(server, client, seen).keys()], [
+    "/islands/i.css",
+    "/islands/lone.css",
+  ]);
+  server.delete("/islands/i.css");
+  // Gone from the server graph: stale. Never in it: still the client's own.
+  assertEquals([...liveClientSheets(server, client, seen).keys()], ["/islands/lone.css"]);
+  server.set("/islands/i.css", ".i{}");
+  assertEquals(liveClientSheets(server, client, seen).has("/islands/i.css"), true);
 });

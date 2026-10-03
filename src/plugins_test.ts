@@ -196,3 +196,17 @@ Deno.test("a CSS module compiles to the same JS every time", () => {
   }
   assertEquals(seen.size, 1);
 });
+
+Deno.test("a stylesheet nothing imports any more leaves the collection", () => {
+  const sheets = new Map<string, string>();
+  let changes = 0;
+  const p = css(sheets, () => changes++);
+  run(p, ".a{color:red}", "/a.css");
+  run(p, ".b{color:red}", "/b.css");
+  changes = 0;
+  const buildEnd = p.buildEnd as unknown as (this: { getModuleIds(): string[] }) => void;
+  buildEnd.call({ getModuleIds: () => ["/a.css", "/b.css", "/x.tsx"] });
+  assertEquals([[...sheets.keys()], changes], [["/a.css", "/b.css"], 0]);
+  buildEnd.call({ getModuleIds: () => ["/a.css", "/x.tsx"] });
+  assertEquals([[...sheets.keys()], changes], [["/a.css"], 1]);
+});

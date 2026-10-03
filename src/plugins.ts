@@ -193,6 +193,17 @@ function acceptSelf(key: string): string {
 export function css(collected: Map<string, string>, onChange?: () => void): Plugin {
   return {
     name: "fu:css",
+    // A sheet whose import was removed is no longer transformed, so nothing
+    // above would ever take it out again: drop what the module graph no longer
+    // holds once each build has settled.
+    buildEnd(this: { getModuleIds(): Iterable<string> }) {
+      const live = new Set(this.getModuleIds());
+      let pruned = false;
+      for (const id of collected.keys()) {
+        if (!live.has(id)) pruned = collected.delete(id);
+      }
+      if (pruned) onChange?.();
+    },
     transform: {
       filter: { id: /\.css$/ },
       handler(code, id) {
