@@ -69,6 +69,14 @@ async function applyPatch(url, allChangedIds) {
     location.reload();
     return;
   }
+  // A CSS module's exports are its class names. Run the new factory before
+  // the islands that import it, or a class added in this save reads as
+  // undefined until the page is reloaded.
+  for (const id of allChangedIds || []) {
+    if (!id.endsWith(".module.css")) continue;
+    rt.removeModuleCache(id);
+    rt.initModule(id);
+  }
   if (!changedIds || changedIds.length === 0) return;
   if (selfAccepting.length !== changedIds.length) {
     console.debug("[hmr] some modules did not accept; reloading");

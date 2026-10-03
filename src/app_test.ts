@@ -162,3 +162,9 @@ Deno.test("a middleware that returns something other than a Response rejects", a
   }] as unknown as Middleware<S>[], () => new Response("ok"));
   await assertRejects(() => run(ctx()), Error, "not a Response");
 });
+
+Deno.test("the ctx a middleware gets can be logged and interpolated", async () => {
+  // It had no prototype, so `${ctx}` and console.log's formatter threw.
+  const run = compose<S>([(c) => new Response(String(c))], () => new Response("end"));
+  assertEquals(await (await run(ctx())).text(), "[object Object]");
+});

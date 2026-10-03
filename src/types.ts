@@ -9,6 +9,11 @@ export interface Assets {
   css: Asset[];
   /** Modules the entry will import, announced early as `modulepreload`. */
   preload?: Asset[];
+  /**
+   * Island file ("/islands/Counter.tsx") to the URL of its chunk. A page
+   * preloads the chunks of the islands it rendered.
+   */
+  islands?: Record<string, string>;
 }
 
 /**
@@ -107,7 +112,7 @@ export interface FuOptions {
   root: string;
   /** Dev server port. Defaults to 1337. */
   port?: number;
-  /** Dev server bind address. Defaults to 0.0.0.0 (all interfaces). */
+  /** Dev server bind address. Defaults to 127.0.0.1; `0.0.0.0` opens it to the network. */
   hostname?: string;
   /** Build output directory. Defaults to `<root>/.output`. */
   outDir?: string;

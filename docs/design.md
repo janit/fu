@@ -1,6 +1,6 @@
 # Fresh Urquell — design
 
-**Date:** 2026-09-09 (design), updated the same evening after the first cleanup pass
+**Date:** 2026-09-09 (design), kept up to date since; last revised 2026-10-03
 **Status:** implemented and verified; a living document
 **Package:** `@janit/fu` (repo `janit/fu`)
 
@@ -60,7 +60,12 @@ The core consumes exactly two things and knows nothing else about the build:
 
 ```ts
 type RouteManifest = Record<string, () => Promise<RouteModule>>;
-type Assets = { js: { href: string }[]; css: { href: string }[] };
+type Assets = {
+  js: { href: string }[];
+  css: { href: string }[];
+  preload?: { href: string }[];
+  islands?: Record<string, string>; // island file -> its chunk's URL
+};
 ```
 
 This boundary is not aspirational. It was verified twice: the core ran
@@ -166,7 +171,8 @@ So the contract is small:
 type Middleware<S> = (ctx: Ctx<S>) => Response | Promise<Response>;
 interface Ctx<S> {
   req: Request; url: URL; params: Record<string,string>;
-  state: S; head: Head; data?: unknown; next(): Promise<Response>;
+  state: S; head: Head; data?: unknown; error?: RouteError;
+  next(): Promise<Response>;
 }
 ```
 
@@ -226,7 +232,12 @@ site open a WebSocket to localhost — no CORS applies to the handshake. So it
 checks `Origin`: only a page on the dev port, under a loopback name or the
 bound `--host`, gets a socket; everything else, including DNS rebinding (which
 keeps the port but not the name) and a missing `Origin`, gets a 403. It binds
-the same host as the dev server.
+the same host as the dev server, which is `127.0.0.1` unless `--host` says
+otherwise: the dev server hands out source and stack traces, so being
+reachable from the network is opt-in. On the app port the generated dev entry
+checks the `Host` header for the same reason, answering only to loopback
+names, `*.localhost` and the bound `--host` (and to anything when bound to
+`0.0.0.0`, where the names cannot be known).
 
 **State preservation without Babel.** Prefresh would reintroduce Babel into an
 otherwise all-Rust pipeline. Instead, islands hydrate behind a wrapper whose
@@ -296,10 +307,17 @@ Each of these cost real debugging and none is documented upstream:
     `/`: one at the root falls through to the app and gets no cache header.
     Hence the build serves its hashed client files from `/_fu/`. That header
     is a route rule applied after the app answers, so the bare `/_fu/`, which
-    falls through to the app's 404, needs an exact rule to override it.
+    falls through to the app's 404, needs an exact rule to override it. Rules
+    match on path alone and are set last (h3's `headers` rule writes them in a
+    `finally`), so a non-GET request under the prefix, which also falls to
+    the app, still leaves with the assets' header; nothing the app or the
+    generated entry does to the response survives. A missing file on GET is
+    answered by Nitro's static handler as a JSON 404 with no cache header.
 14. Nitro writes into the output dir without clearing it, so earlier builds'
     hashed assets and another preset's `deno.json` ship along. The build
-    removes a dir holding `nitro.json` first.
+    removes the default `.output` first, and a custom `outDir` when it holds
+    `nitro.json`; nitro writes that file last, so in a custom dir without one
+    (a build that died half-way) only `public/_fu` and `server` are cleared.
 
 ## Distribution
 
@@ -345,7 +363,9 @@ and `node:sqlite`'s `number | bigint` row counts were caught.
 Type-checking the tarball proves nothing: Deno does not type-check inside
 `node_modules`, so a `.d.ts` importing an unshipped path and a `bin` missing its
 own imports both pass silently — and both shipped in 0.0.2. `scripts/check-package.sh`
-therefore packs the tarball, installs it into a scratch copy of the example app,
+(private repo only) therefore packs the tarball, `npm install`s it into a scratch
+copy of the example app, so the dependencies are the ones a consumer would
+resolve rather than this repo's lockfile,
 builds that app **through the package's own bin**, serves it, and then runs
 the dev server from the package as well — a build proves nothing about dev,
 and the monorepo dev server was broken for a day by a resolution problem
@@ -380,15 +400,15 @@ src/
   dev.ts           dev driver
   cli.ts           `fu dev` / `fu build`
 example/           runnable app exercising every feature (workspace member)
-fu-todo/           complete app with SQLite and a JSON API (workspace member,
-                   published separately as janit/fu-todo)
+fu-todo/           complete app with SQLite and a JSON API (workspace member;
+                   private repo only, published separately as janit/fu-todo)
 ```
 
 `build.ts` and `dev.ts` are each a page: everything they would otherwise
 duplicate lives in `driver.ts`. `plugins.ts` knows nothing about projects.
 `deno task check` runs `deno fmt --check`, `deno lint`, type checks of the
-framework and both apps, and the tests; `deno task check:pkg` packs and
-exercises the npm artefact.
+framework and both apps, and the tests; `deno task check:pkg` (private repo
+only) packs and exercises the npm artefact.
 
 Exported functions keep explicit return types. JSR's slow-types rule imposed
 that and JSR is gone, but the habit makes the public surface readable without
@@ -396,7 +416,7 @@ inference and stays.
 
 ## Versions
 
-Preact 11 (`11.0.0-rc.2`), `@preact/signals` 2.11, Nitro 3 beta,
+Preact 11 (`^11.0.0-rc.2`, which takes 11.0), `@preact/signals` 2.11, Nitro 3 beta,
 rolldown 1.2, lightningcss 1.33. rolldown's `devMode` is marked "not ready for
 public usage"; instability here is accepted deliberately.
 

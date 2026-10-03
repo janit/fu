@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { buildRoutes, filePathToPattern, match } from "./router.ts";
 import type { RouteManifest } from "./types.ts";
 
@@ -109,4 +109,49 @@ Deno.test("a malformed escape is no match, not a throw", () => {
   const routes = buildRoutes({ "/routes/blog/[slug].tsx": mod });
   assertEquals(match(routes, "/blog/%E0%A4%A"), null);
   assertEquals(match(routes, "/blog/%"), null);
+});
+
+Deno.test("pattern syntax in a file name is a literal character, not a pattern", () => {
+  // `a+b.tsx` used to fail URLPattern parsing and take the whole app down at
+  // startup; `(admin)` became a regex group that matched `/admin/x`.
+  const routes = buildRoutes({
+    "/routes/a+b.tsx": mod,
+    "/routes/(admin)/x.tsx": mod,
+    "/routes/what?.tsx": mod,
+    "/routes/[slug].tsx": mod,
+  });
+  assertEquals(match(routes, "/a+b")?.route.pattern, "/a\\+b");
+  assertEquals(match(routes, "/(admin)/x")?.params, {});
+  assertEquals(match(routes, "/admin/x"), null);
+  assertEquals(match(routes, "/what%3F")?.params, {});
+  assertEquals(match(routes, "/aab")?.params, { slug: "aab" });
+});
+
+Deno.test("a param name URLPattern would misread is refused, naming the file", () => {
+  // `[my-id]` became `:my-id`: a param `my` followed by a literal `-id`.
+  assertThrows(() => buildRoutes({ "/routes/[my-id].tsx": mod }), Error, "/routes/[my-id].tsx");
+  assertThrows(() => buildRoutes({ "/routes/[...].tsx": mod }), Error, "param name");
+});
+
+Deno.test("two files that answer the same path are refused", () => {
+  assertThrows(
+    () => buildRoutes({ "/routes/blog.tsx": mod, "/routes/blog/index.tsx": mod }),
+    Error,
+    "/routes/blog/index.tsx",
+  );
+  assertThrows(
+    () => buildRoutes({ "/routes/[x].tsx": mod, "/routes/[y].tsx": mod }),
+    Error,
+    "both",
+  );
+});
+
+Deno.test("a needlessly escaped path still reaches its literal route", () => {
+  const routes = buildRoutes({
+    "/routes/about.tsx": mod,
+    "/routes/café.tsx": mod,
+    "/routes/[x].tsx": mod,
+  });
+  assertEquals(match(routes, "/%61bout")?.route.pattern, "/about");
+  assertEquals(match(routes, "/caf%c3%a9")?.route.pattern, "/café");
 });

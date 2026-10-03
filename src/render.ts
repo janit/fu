@@ -1,4 +1,12 @@
-import { type ComponentChildren, type ComponentType, h, options, type VNode } from "preact";
+import {
+  type ComponentChildren,
+  type ComponentType,
+  createContext,
+  h,
+  options,
+  type VNode,
+} from "preact";
+import { useContext } from "preact/hooks";
 import { renderToStringAsync } from "preact-render-to-string";
 import { buildRoutes, match, type Route } from "./router.ts";
 import { type App, compose } from "./app.ts";
@@ -12,12 +20,25 @@ const wrapped = new WeakMap<ComponentType<never>, ComponentType<never>>();
 let hookInstalled = false;
 
 /**
+ * Where a render is: below an island (`INSIDE`), where everything is part of
+ * that island, or in a page, where the value collects the files of the islands
+ * rendered so the document can preload their chunks. A context rather than a
+ * module variable because renders are async and overlap.
+ */
+const INSIDE = Symbol("fu.inside");
+const Scope = createContext<Set<string> | typeof INSIDE | null>(null);
+
+/**
  * Intercept island components during render. Preact's `options.vnode` hook
  * fires for every vnode created, so an island is recognised from the stamp the
  * SSR transform left on the component itself — no separate registry.
  *
- * The wrapper forwards to an arrow that does NOT carry the stamp, so rendering
- * the island's own output does not re-enter this branch.
+ * The wrapper forwards to a component that does NOT carry the stamp, so
+ * rendering the island's own output does not re-enter this branch.
+ *
+ * An island rendered inside another gets no marker of its own. The client
+ * hydrates the outer one whole, inner island included; a second marker would
+ * be hydrated again, into a node the first hydration had already replaced.
  */
 function installIslandHook(): void {
   if (hookInstalled) return;
@@ -29,20 +50,39 @@ function installIslandHook(): void {
       let w = wrapped.get(type);
       if (!w) {
         const key = type[ISLAND];
-        const Inner = ((props: never) => (type as (p: never) => unknown)(props)) as ComponentType<
-          never
-        >;
-        w = ((props: Record<string, unknown>) =>
-          h("div", {
-            "data-island": key,
-            "data-props": serializeProps(key, props),
-          }, h(Inner as never, props as never))) as ComponentType<never>;
+        const Inner = unstamped(type);
+        const file = key.split("#")[0];
+        w = ((props: Record<string, unknown>) => {
+          const scope = useContext(Scope);
+          if (scope === INSIDE) return h(Inner, props as never);
+          scope?.add(file);
+          return h(
+            Scope.Provider,
+            { value: INSIDE },
+            h("div", {
+              "data-island": key,
+              "data-props": serializeProps(key, props),
+            }, h(Inner, props as never)),
+          );
+        }) as ComponentType<never>;
         wrapped.set(type, w);
       }
       vnode.type = w as never;
     }
     prev?.(vnode);
   };
+}
+
+/** The same component without the stamp. A class has to stay one: it cannot be called. */
+function unstamped(type: ComponentType<never>): ComponentType<never> {
+  const proto = (type as { prototype?: { render?: unknown } }).prototype;
+  if (typeof proto?.render !== "function") {
+    return ((props: never) => (type as (p: never) => unknown)(props)) as ComponentType<never>;
+  }
+  const Inner = class extends (type as new (...args: never[]) => object) {};
+  // Statics are inherited, the stamp with them; shadow it.
+  Object.defineProperty(Inner, ISLAND, { value: undefined });
+  return Inner as unknown as ComponentType<never>;
 }
 
 /**
@@ -52,20 +92,30 @@ function installIslandHook(): void {
  * it and wipe what the server showed. Fail the render instead, naming the prop.
  */
 function serializeProps(key: string, props: Record<string, unknown> | null): string {
-  return JSON.stringify(props ?? {}, (k, v) => {
-    const kind = typeof v === "function"
-      ? "function"
-      : v && typeof v === "object" && v.constructor === undefined && "type" in v && "props" in v
-      ? "JSX element"
-      : null;
-    if (kind) {
-      throw new Error(
-        `fu: island ${key} was passed a ${kind} in prop "${k}", but island props must be ` +
-          `JSON. Render it inside the island, or pass the data it needs.`,
-      );
-    }
-    return v;
-  });
+  // Checked by a walk rather than a JSON.stringify replacer: the replacer is
+  // called back for every key and made serialising a list three times slower.
+  checkProps(key, "", props);
+  return JSON.stringify(props ?? {});
+}
+
+function checkProps(key: string, name: string, v: unknown): void {
+  if (v === null || typeof v !== "object") {
+    if (typeof v === "function") refuseProp(key, name, "function");
+    return;
+  }
+  const o = v as Record<string, unknown>;
+  if (o.constructor === undefined && "type" in o && "props" in o) {
+    refuseProp(key, name, "JSX element");
+  }
+  if (Array.isArray(o)) { for (let i = 0; i < o.length; i++) checkProps(key, String(i), o[i]); }
+  else if (typeof o.toJSON !== "function") { for (const k in o) checkProps(key, k, o[k]); }
+}
+
+function refuseProp(key: string, name: string, kind: string): never {
+  throw new Error(
+    `fu: island ${key} was passed a ${kind} in prop "${name}", but island props must be ` +
+      `JSON. Render it inside the island, or pass the data it needs.`,
+  );
 }
 
 /** Optional root wrapper (`routes/_app.tsx`) around every page. */
@@ -121,6 +171,29 @@ export function createHandler<S = Record<string, unknown>>(
   };
 }
 
+/**
+ * Dev only: answer requests addressed to one of `hosts` (or a `*.localhost`
+ * name, which always resolves to loopback) and refuse the rest. Binding to
+ * loopback keeps other machines out, but not a web page that points its own
+ * domain at 127.0.0.1; the Host header is the one thing such a page cannot fake.
+ */
+export function onlyHosts(
+  handler: (req: Request) => Promise<Response>,
+  hosts: readonly string[],
+): (req: Request) => Promise<Response> {
+  const allowed = new Set(hosts);
+  return (req) => {
+    const host = new URL(req.url).hostname;
+    if (allowed.has(host) || host.endsWith(".localhost")) return handler(req);
+    return Promise.resolve(
+      new Response(
+        `fu dev: not serving "${host}". Start the dev server with --host ${host} to allow it.\n`,
+        { status: 403, headers: { "content-type": "text/plain; charset=utf-8" } },
+      ),
+    );
+  };
+}
+
 function withoutBody(res: Response): Response {
   res.body?.cancel();
   return new Response(null, {
@@ -146,7 +219,9 @@ async function renderRoute<S>(
 ): Promise<Response> {
   try {
     const m = match(routes, ctx.url.pathname);
-    if (!m) throw new HttpError(404);
+    // Not thrown: a miss is the commonest failure there is (every bot probe),
+    // and building an Error just to catch it below costs microseconds each.
+    if (!m) return renderError(ctx, { status: 404, message: statusText(404) }, parts);
     ctx.params = m.params;
 
     // Cached on the route: a dynamic import of a loaded module is cheap but
@@ -155,7 +230,11 @@ async function renderRoute<S>(
     const method = ctx.req.method;
     // HEAD borrows the GET handler unless it has its own; the body is dropped
     // on the way out.
-    const fn = mod.handlers?.[method] ?? (method === "HEAD" ? mod.handlers?.GET : undefined);
+    // Own properties only: a method token like `toString` must not find
+    // Object.prototype's.
+    const own = (name: string) =>
+      mod.handlers && Object.hasOwn(mod.handlers, name) ? mod.handlers[name] : undefined;
+    const fn = own(method) ?? (method === "HEAD" ? own("GET") : undefined);
     if (fn) {
       const result = await fn(ctx);
       if (result instanceof Response) return result;
@@ -173,11 +252,26 @@ async function renderRoute<S>(
     }
 
     const Page = mod.default;
-    if (!Page) throw new HttpError(404);
+    // Only reachable after a handler ran and returned data: answering 404 for
+    // a request whose side effects went through would send the author looking
+    // in the wrong place. A missing `return` in an API handler is the usual cause.
+    if (!Page) {
+      throw new Error(
+        `fu: the ${method} handler for ${m.route.pattern} returned ${
+          ctx.data === undefined ? "nothing" : "data"
+        }, not a Response, and the route has no page to render`,
+      );
+    }
     return htmlResponse(await renderTree(ctx, h(Page as never, ctx as never), parts), ctx, parts);
   } catch (err) {
     return renderError(ctx, err, parts);
   }
+}
+
+/** A rendered body, and the island files that went into it. */
+interface Rendered {
+  body: string;
+  islands: Set<string>;
 }
 
 /** Render the page, wrapped in `routes/_app.tsx` when the project has one. */
@@ -185,13 +279,14 @@ async function renderTree<S>(
   ctx: Ctx<S>,
   page: VNode,
   parts: HandlerParts<S>,
-): Promise<string> {
+): Promise<Rendered> {
   const tree = parts.Shell ? h(parts.Shell as never, { ctx, children: page } as never) : page;
-  return await renderToStringAsync(tree);
+  const islands = new Set<string>();
+  return { body: await renderToStringAsync(h(Scope.Provider, { value: islands }, tree)), islands };
 }
 
 function htmlResponse<S>(
-  body: string,
+  { body, islands }: Rendered,
   ctx: Ctx<S>,
   parts: HandlerParts<S>,
   status = 200,
@@ -201,7 +296,7 @@ function htmlResponse<S>(
   // seconds, and a shared cache would pin that.
   if (status >= 400) headers["cache-control"] = "no-store";
   // `document` is called after rendering, so a component can still set ctx.head.
-  return new Response(document(body, ctx.head, parts.assets), { status, headers });
+  return new Response(document(body, ctx.head, parts.assets, islands), { status, headers });
 }
 
 /**
@@ -303,7 +398,13 @@ function tagsFor(assets: Assets): { head: string; body: string } {
 }
 
 /** Assemble the HTML document from the page body, head metadata and assets. */
-export function document(body: string, head: Head, assets: Assets): string {
+export function document(
+  body: string,
+  head: Head,
+  assets: Assets,
+  /** Files of the islands in `body`; their chunks are preloaded. */
+  islands?: Iterable<string>,
+): string {
   const parts: string[] = [
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -322,6 +423,12 @@ export function document(body: string, head: Head, assets: Assets): string {
   for (const link of head.links ?? []) parts.push(tag("link", link));
   const tags = tagsFor(assets);
   parts.push(tags.head);
+  if (assets.islands && islands) {
+    for (const file of islands) {
+      const href = assets.islands[file];
+      if (href) parts.push(tag("link", { rel: "modulepreload", href }));
+    }
+  }
   if (head.jsonLd !== undefined) {
     // `<` escaped so a string value cannot close the script element early.
     const json = JSON.stringify(head.jsonLd).replace(/</g, "\\u003c");

@@ -18,27 +18,53 @@ import type { FuOptions } from "./types.ts";
 /** URL prefix of the built client files. */
 const ASSETS = "/_fu/";
 
+/**
+ * Nitro turns the assets' max-age into a route rule on everything under the
+ * prefix, applied after the app answers. The bare prefix itself is not a file,
+ * so nitro hands it to the app, whose 404 would then be cached for a year. An
+ * exact rule outranks the wildcard.
+ *
+ * What this cannot reach: a non-GET request under the prefix also falls to the
+ * app, and its 404 or 405 leaves with the assets' header. Rules match on path
+ * alone and are applied last, so nothing the app sets survives; no cache stores
+ * a response to POST, which is why it is left at that.
+ */
+export function cacheRules(): Record<string, { headers: Record<string, string> }> {
+  return Object.fromEntries(
+    [ASSETS, ASSETS.slice(0, -1)].map((p) => [p, { headers: { "cache-control": "no-store" } }]),
+  );
+}
+
 export async function build(opts: FuOptions): Promise<void> {
   const project = scanProject(opts.root);
   const outDir = opts.outDir ? path.resolve(opts.outDir) : path.join(project.root, ".output");
 
   // Nitro writes into the output dir without clearing it, so an earlier
   // build's hashed assets, or a deno.json from another preset, would ship with
-  // this one. Only a dir nitro made (it leaves nitro.json) is cleared.
-  if (fs.existsSync(path.join(outDir, "nitro.json"))) fs.rmSync(outDir, { recursive: true });
+  // this one. The default dir is ours, and so is one nitro made (it leaves
+  // nitro.json, but only at the very end, so a build that died half-way has
+  // none). In any other dir only what this build is about to write is cleared.
+  if (!opts.outDir || fs.existsSync(path.join(outDir, "nitro.json"))) {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  } else {
+    for (const sub of ["public" + ASSETS, "server"]) {
+      fs.rmSync(path.join(outDir, sub), { recursive: true, force: true });
+    }
+  }
 
   // ---- css ----
   // The stylesheet's hashed name goes into the server entry, but routes and the
   // shell import CSS only the server bundle would see. So walk the server entry
   // points first, just for their CSS; islands' CSS joins during the client build.
-  const sheets = new Map<string, string>();
-  const scan = await rolldown(cssInput(project, sheets));
+  const serverSheets = new Map<string, string>();
+  const clientSheets = new Map<string, string>();
+  const scan = await rolldown(cssInput(project, serverSheets));
   await scan.generate({ format: "esm" });
   await scan.close();
 
   // ---- client ----
   emptyDir(project.clientDir);
-  const bundle = await rolldown(clientInput(project, sheets));
+  const bundle = await rolldown(clientInput(project, clientSheets));
   const result = await bundle.write({
     dir: project.clientDir,
     format: "esm",
@@ -50,7 +76,7 @@ export async function build(opts: FuOptions): Promise<void> {
 
   const entry = result.output.find((o) => o.type === "chunk" && o.isEntry);
   if (!entry) throw new Error("fu: client build produced no entry chunk");
-  const cssFile = writeSheets(project.clientDir, sheets);
+  const cssFile = writeSheets(project.clientDir, [serverSheets, clientSheets]);
 
   // ---- server ----
   // Shared chunks (preact, the JSX runtime) are imported by the islands, so the
@@ -61,6 +87,17 @@ export async function build(opts: FuOptions): Promise<void> {
     js: [{ href: ASSETS + entry.fileName }],
     css: cssFile ? [{ href: ASSETS + cssFile }] : [],
     preload: shared.map((c) => ({ href: ASSETS + c.fileName })),
+    // An island's own chunk is a dynamic import of the entry, so the browser
+    // would only ask for it once the entry had run. Each page preloads the
+    // chunks of the islands it rendered.
+    islands: Object.fromEntries(
+      result.output.flatMap((o) => {
+        if (o.type !== "chunk" || !o.isDynamicEntry || !o.facadeModuleId) return [];
+        const file = "/" +
+          path.relative(project.root, o.facadeModuleId.split("?")[0]).split(path.sep).join("/");
+        return file.startsWith("/islands/") ? [[file, ASSETS + o.fileName]] : [];
+      }),
+    ),
   });
   const nitro = await createNitro({
     ...nitroOptions(project, ssrEntry),
@@ -75,13 +112,7 @@ export async function build(opts: FuOptions): Promise<void> {
     // dir mounted below the root (one at `/` falls through to the app), hence
     // the prefix. Dev names are not hashed, so dev keeps serving from `/`.
     publicAssets: [{ dir: project.clientDir, baseURL: ASSETS, maxAge: 31536000 }],
-    // That max-age is a route rule on everything under the prefix, applied
-    // after the app answers. The bare prefix itself is not a file, so nitro
-    // hands it to the app, whose 404 would then be cached for a year. An
-    // exact rule outranks the wildcard.
-    routeRules: Object.fromEntries(
-      [ASSETS, ASSETS.slice(0, -1)].map((p) => [p, { headers: { "cache-control": "no-store" } }]),
-    ),
+    routeRules: cacheRules(),
     compressPublicAssets: true,
   });
   await copyPublicAssets(nitro);

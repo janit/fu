@@ -35,7 +35,8 @@ const FIELDS = ["req", "url", "params", "state", "head", "data", "error"] as con
  * once, so a level costs one small object rather than a copy of every field.
  */
 const levelProto: object = Object.create(
-  null,
+  // Not null: `${ctx}` and a logger's formatter both need `toString`.
+  Object.prototype,
   Object.fromEntries(FIELDS.map((k) => [k, {
     get(this: { [ROOT]: Record<string, unknown> }) {
       return this[ROOT][k];

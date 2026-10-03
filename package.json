@@ -1,6 +1,6 @@
 {
   "name": "@janit/fu",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "A minimal islands framework on Preact 11, rolldown and Nitro. Runs on Deno, Node and Bun.",
   "license": "MIT",
@@ -51,7 +51,8 @@
     "lightningcss": "^1.33.0",
     "nitro": "^3.0.260903-beta",
     "preact-render-to-string": "^6.7.0",
-    "rolldown": "^1.2.9",
+    "rolldown": "^1.2.11",
+    "srvx": "^1.0.3",
     "urlpattern-polyfill": "^10.1.0"
   },
   "peerDependencies": {
@@ -65,8 +66,8 @@
   },
   "devDependencies": {
     "@preact/signals": "^2.11.2",
-    "@types/node": "^26.6.2",
-    "preact": "11.0.0-rc.2",
+    "@types/node": "^26.6.3",
+    "preact": "^11.0.0-rc.2",
     "typescript": "^7.0.2"
   },
   "engines": {

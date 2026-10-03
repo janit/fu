@@ -1,11 +1,13 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { optional, ssrModule, walk } from "./driver.ts";
+import { mergeSheets, optional, scanProject, ssrModule, walk } from "./driver.ts";
 
 const tmp = await Deno.makeTempDir();
 const assets = { js: [], css: [] };
 
+addEventListener("unload", () => Deno.removeSync(tmp, { recursive: true }));
+
 Deno.test("walk finds routes and skips framework files", async () => {
-  const root = await Deno.makeTempDir();
+  const root = await Deno.makeTempDir({ dir: tmp });
   await Deno.mkdir(`${root}/routes/blog`, { recursive: true });
   for (
     const f of [
@@ -65,4 +67,58 @@ Deno.test("ssrModule unwraps the Request from nitro's H3Event", () => {
   }, assets);
   assertStringIncludes(out, "input instanceof Request");
   assertStringIncludes(out, "input?.req");
+});
+
+Deno.test("walk leaves out what is not a route: private directories, tests, declarations", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${root}/routes/_parts`, { recursive: true });
+    for (
+      const f of [
+        "routes/index.tsx",
+        "routes/_parts/Part.tsx",
+        "routes/index_test.tsx",
+        "routes/index.test.ts",
+        "routes/types.d.ts",
+      ]
+    ) await Deno.writeTextFile(`${root}/${f}`, "");
+    assertEquals(walk(root, "routes"), ["/routes/index.tsx"]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("the shell, error page and app are found whichever source extension they use", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${root}/routes`);
+    for (const f of ["routes/_app.jsx", "routes/_error.js", "app.js"]) {
+      await Deno.writeTextFile(`${root}/${f}`, "");
+    }
+    const project = scanProject(root);
+    assertStringIncludes(project.shellPath ?? "", "_app.jsx");
+    assertStringIncludes(project.errorPath ?? "", "_error.js");
+    assertStringIncludes(project.appPath ?? "", "app.js");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("the server's stylesheets come first, in dev and in a build alike", () => {
+  // The two bundles finish in a different order in dev than in a build, and
+  // the cascade followed whichever came first.
+  const server = new Map([["/routes/a.css", ".a{}"], ["/islands/i.css", ".i{}"]]);
+  const client = new Map([["/islands/i.css", ".i{}"], ["/islands/only.css", ".o{}"]]);
+  assertEquals(mergeSheets([server, client]), ".a{}\n.i{}\n.o{}");
+  assertEquals(mergeSheets([new Map(), new Map()]), null);
+});
+
+Deno.test("the dev entry guards the Host header, the built one does not", () => {
+  const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
+  const dev = ssrModule(project, assets, ["localhost", "127.0.0.1"]);
+  assertStringIncludes(
+    dev,
+    'onlyHosts(createHandler({ manifest, assets }), ["localhost","127.0.0.1"])',
+  );
+  assertEquals(ssrModule(project, assets).includes("onlyHosts"), false);
 });

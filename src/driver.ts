@@ -43,6 +43,7 @@ const PACKAGE_NAME = ((): string | null => {
 
 /** Plugins every bundle of app code needs, client and server alike. */
 function shared(
+  project: Project,
   sheets: Map<string, string>,
   jsxOpts: Parameters<typeof jsx>[0],
   onCss?: () => void,
@@ -50,9 +51,25 @@ function shared(
   return [
     ...(PACKAGE_NAME ? [selfAlias(PACKAGE_NAME, HERE, EXT)] : []),
     css(sheets, onCss),
-    jsx(jsxOpts),
+    jsx({ ...jsxOpts, root: project.root }),
   ];
 }
+
+/**
+ * Fail the build on an import that resolves to nothing. Rolldown only warns
+ * and leaves the import in the output, so the build "succeeded" and the server
+ * then died at boot, or answered 500, for want of a package nobody installed.
+ */
+export const strictImports = {
+  name: "fu:strict-imports",
+  onLog(
+    this: { error(message: string): never },
+    _level: string,
+    log: { code?: string; message: string },
+  ) {
+    if (log.code === "UNRESOLVED_IMPORT") this.error(log.message);
+  },
+};
 
 /** Absolute paths of the runtime modules the generated code imports. */
 export const runtime = {
@@ -67,7 +84,7 @@ export interface Project {
   /** Root-relative, e.g. "/routes/blog/[slug].tsx". */
   routeFiles: string[];
   islandFiles: string[];
-  /** Absolute path to `app.ts`, if the project has one. */
+  /** Absolute path to `app.ts` (or .tsx, .js, .jsx), if the project has one. */
   appPath: string | null;
   /** Absolute path to `routes/_app.tsx`, if the project has one. */
   shellPath: string | null;
@@ -90,18 +107,27 @@ export function scanProject(root: string): Project {
     root,
     routeFiles: walk(root, "routes"),
     islandFiles: walk(root, "islands"),
-    appPath: optional(root, "app.ts", "app.tsx"),
-    shellPath: optional(root, "routes/_app.tsx"),
-    errorPath: optional(root, "routes/_error.tsx"),
+    appPath: optional(root, ...sourceNames("app")),
+    shellPath: optional(root, ...sourceNames("routes/_app")),
+    errorPath: optional(root, ...sourceNames("routes/_error")),
     clientDir: path.join(root, "dist/client"),
     genDir: path.join(root, ".fu"),
   };
 }
 
+/** `base` with each extension a route may have, TypeScript first. */
+function sourceNames(base: string): string[] {
+  return [".ts", ".tsx", ".js", ".jsx"].map((ext) => base + ext);
+}
+
+/** Tests and declaration files that sit beside the sources. */
+const NOT_SOURCE = /(\.d\.ts|[._]test\.[tj]sx?)$/;
+
 /**
  * Recursively list source files under `<root>/<sub>`, as root-relative
- * "/sub/a/b.tsx". Underscore-prefixed files are skipped: they are framework
- * files (`routes/_app.tsx`), not routes.
+ * "/sub/a/b.tsx". Underscore-prefixed files and directories are skipped: they
+ * are framework files (`routes/_app.tsx`) or an app's own helpers
+ * (`routes/_parts/`), not routes. So are tests and `.d.ts` files.
  */
 export function walk(root: string, sub: string): string[] {
   const out: string[] = [];
@@ -109,8 +135,9 @@ export function walk(root: string, sub: string): string[] {
     if (!fs.existsSync(dir)) return;
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const f = path.join(dir, e.name);
+      if (e.name.startsWith("_")) continue;
       if (e.isDirectory()) visit(f);
-      else if (/\.[tj]sx?$/.test(e.name) && !e.name.startsWith("_")) {
+      else if (/\.[tj]sx?$/.test(e.name) && !NOT_SOURCE.test(e.name)) {
         out.push("/" + path.relative(root, f).split(path.sep).join("/"));
       }
     }
@@ -142,7 +169,11 @@ export function clientInput(
 ): InputOptions {
   return {
     input: { boot: "fu:boot" },
-    plugins: [virtual({ "fu:boot": bootModule(project) }), ...shared(sheets, { hmr })],
+    plugins: [
+      virtual({ "fu:boot": bootModule(project) }),
+      ...shared(project, sheets, { hmr }),
+      strictImports,
+    ],
     platform: "browser",
     // rolldown types modules by extension and refuses to bundle CSS; css()
     // has already replaced their contents with JS.
@@ -170,7 +201,7 @@ export function nitroOptions(
     publicAssets: [{ dir: project.clientDir, baseURL: "/" }],
     handlers: [{ route: "/**", handler: ssrEntry, format: "web", lazy: false }],
     rollupConfig: {
-      plugins: shared(sheets, { stampIslands: true }, onCss),
+      plugins: [...shared(project, sheets, { stampIslands: true }, onCss), strictImports],
       moduleTypes: { ".css": "js" },
     },
   } as Parameters<typeof createNitro>[0];
@@ -202,21 +233,35 @@ export function cssInput(project: Project, sheets: Map<string, string>): InputOp
   return {
     input: serverEntries(project),
     // After selfAlias, so the framework itself still resolves to its files.
-    plugins: [...shared(sheets, {}), externalPackages],
+    plugins: [...shared(project, sheets, {}), externalPackages],
     platform: "node",
     moduleTypes: { ".css": "js" },
     logLevel: "silent",
   };
 }
 
-/** Concatenate collected stylesheets into one file; hashed unless a name is given. */
+/**
+ * One stylesheet from several collections, each sheet once, in the order
+ * given. Callers pass the server's sheets first: its bundle and the client's
+ * finish in a different order in dev than in a build, and the cascade must not
+ * depend on which one won.
+ */
+export function mergeSheets(collections: Map<string, string>[]): string | null {
+  const merged = new Map<string, string>();
+  for (const sheets of collections) {
+    for (const [id, text] of sheets) if (!merged.has(id)) merged.set(id, text);
+  }
+  return merged.size === 0 ? null : [...merged.values()].join("\n");
+}
+
+/** Write the merged stylesheet; hashed unless a name is given. */
 export function writeSheets(
   dir: string,
-  sheets: Map<string, string>,
+  collections: Map<string, string>[],
   name?: string,
 ): string | null {
-  if (sheets.size === 0) return null;
-  const merged = [...sheets.values()].join("\n");
+  const merged = mergeSheets(collections);
+  if (merged === null) return null;
   const file = name ?? `style-${hash(merged)}.css`;
   fs.writeFileSync(path.join(dir, file), merged);
   return file;
@@ -244,6 +289,8 @@ export function bootModule(project: Pick<Project, "root" | "islandFiles">): stri
 export function ssrModule(
   project: Pick<Project, "root" | "routeFiles" | "appPath" | "shellPath" | "errorPath">,
   assets: Assets,
+  /** Dev only: the Host names to answer to. Omit to answer to any. */
+  hosts?: readonly string[],
 ): string {
   const optionalImports: [name: string, file: string | null][] = [
     ["app", project.appPath],
@@ -252,15 +299,15 @@ export function ssrModule(
   ];
   const present = optionalImports.filter(([, file]) => file);
   return [
-    `import { createHandler } from ${JSON.stringify(runtime.render)};`,
+    `import { createHandler${hosts ? ", onlyHosts" : ""} } from ${JSON.stringify(runtime.render)};`,
     ...present.map(([name, file]) => `import ${name} from ${JSON.stringify(file)};`),
     `const manifest = {`,
     project.routeFiles.map((f) => "  " + lazyImport(project.root, f)).join(",\n"),
     `};`,
     `const assets = ${JSON.stringify(assets)};`,
-    `const handler = createHandler({ manifest, assets${
+    `const handler = ${hosts ? "onlyHosts(" : ""}createHandler({ manifest, assets${
       present.map(([n]) => `, ${n}`).join("")
-    } });`,
+    } })${hosts ? `, ${JSON.stringify(hosts)})` : ""};`,
     `const toRequest = (input) => input instanceof Request ? input : (input?.req ?? input);`,
     `export default (input) => handler(toRequest(input));`,
     ``,
@@ -272,9 +319,13 @@ export function ssrModule(
  * file: nitro path-resolves `handlers[].handler`, so a virtual id would not
  * survive its routing codegen.
  */
-export function writeSsrEntry(project: Project, assets: Assets): string {
+export function writeSsrEntry(
+  project: Project,
+  assets: Assets,
+  hosts?: readonly string[],
+): string {
   emptyDir(project.genDir);
   const file = path.join(project.genDir, "ssr.ts");
-  fs.writeFileSync(file, ssrModule(project, assets));
+  fs.writeFileSync(file, ssrModule(project, assets, hosts));
   return file;
 }

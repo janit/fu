@@ -16,6 +16,11 @@ export class HttpError extends Error {
   readonly headers?: Headers;
 
   constructor(status: number, message?: string, init?: { headers?: HeadersInit }) {
+    // Anything else cannot be an error response: 204 and 304 may not carry
+    // the body the renderer attaches, and a 2xx thrown is a bug.
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      throw new RangeError(`fu: HttpError status must be 400 to 599, got ${status}`);
+    }
     super(message ?? statusText(status));
     this.name = "HttpError";
     this.status = status;

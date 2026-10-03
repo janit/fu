@@ -21,7 +21,8 @@ export const trailingSlash: Middleware<State> = (ctx) => {
   if (pathname === "/" || !pathname.endsWith("/")) return ctx.next();
   // Refuse to emit a protocol-relative Location ("//evil.com") as an open
   // redirect; fall through and let the request 404 instead.
-  const target = pathname.replace(/\/+$/, "");
+  // `//` and `///` strip to nothing, which would be an empty Location.
+  const target = pathname.replace(/\/+$/, "") || "/";
   if (target.startsWith("//")) return ctx.next();
   return new Response(null, { status: 301, headers: { location: target + search } });
 };

@@ -29,43 +29,100 @@ export interface Matched<S = Record<string, unknown>> {
   params: Record<string, string>;
 }
 
+/** `[name]` or `[...name]`, as a whole path segment. */
+const PARAM = /^\[(\.\.\.)?(.*)\]$/;
+/** What URLPattern reads as one param name; `[my-id]` would become `:my` plus a literal `-id`. */
+const PARAM_NAME = /^[A-Za-z_$][\w$]*$/;
+/** Anything URLPattern would read as syntax rather than as a literal character. */
+const PATTERN_SYNTAX = /[:*?+(){}\\]/g;
+
+interface Parsed {
+  pattern: string;
+  /** The pattern with param names dropped: two files with the same shape collide. */
+  shape: string;
+  /** The path itself when no segment is a param, else null. */
+  literal: string | null;
+  /** 0 static, 1 dynamic, 2 wildcard. */
+  score: number;
+}
+
+function parse(file: string): Parsed {
+  let p = file.replace(/^\/routes/, "").replace(/\.[tj]sx?$/, "");
+  if (p.endsWith("/index")) p = p.slice(0, -"/index".length);
+  let score = 0;
+  const shape: string[] = [];
+  const pattern = p.split("/").map((s) => {
+    const m = PARAM.exec(s);
+    if (!m) {
+      // A file name is a literal: `a+b.tsx` answers `/a+b`.
+      const escaped = s.replace(PATTERN_SYNTAX, "\\$&");
+      shape.push(escaped);
+      return escaped;
+    }
+    const [, rest, name] = m;
+    if (!PARAM_NAME.test(name)) {
+      throw new Error(
+        `fu: ${file}: the param name "${name}" must be letters, digits, _ or $, ` +
+          `and not start with a digit`,
+      );
+    }
+    score = Math.max(score, rest ? 2 : 1);
+    shape.push(rest ? ":*" : ":");
+    return ":" + name + (rest ? "*" : "");
+  }).join("/") || "/";
+  return { pattern, shape: shape.join("/") || "/", literal: score === 0 ? p || "/" : null, score };
+}
+
 /**
  * `/routes/blog/[slug].tsx` -> `/blog/:slug`
  * `/routes/files/[...rest].tsx` -> `/files/:rest*`
  * `/routes/index.tsx` -> `/`
  */
 export function filePathToPattern(file: string): string {
-  let p = file.replace(/^\/routes/, "").replace(/\.[tj]sx?$/, "");
-  if (p.endsWith("/index")) p = p.slice(0, -"/index".length);
-  const out = p
-    .split("/")
-    .map((s) =>
-      s.startsWith("[...") && s.endsWith("]")
-        ? ":" + s.slice(4, -1) + "*"
-        : s.startsWith("[") && s.endsWith("]")
-        ? ":" + s.slice(1, -1)
-        : s
-    )
-    .join("/");
-  return out || "/";
+  return parse(file).pattern;
 }
 
-/** Anything URLPattern would read as syntax rather than as a literal character. */
-const PATTERN_SYNTAX = /[:*?+(){}\\]/;
+/** A path the way a request URL's `pathname` spells it. */
+function asPathname(path: string): string {
+  const url = new URL("http://x");
+  url.pathname = path;
+  return canonical(url.pathname);
+}
+
+const ESCAPE = /%[0-9a-fA-F]{2}/g;
+const UNRESERVED = /[A-Za-z0-9\-._~]/;
+
+/**
+ * One spelling per path: an escape that did not need to be one is decoded and
+ * the rest are upper-cased, so `/%61bout` and `/caf%c3%a9` reach the routes
+ * `/about` and `/café` instead of falling through to a param route.
+ */
+function canonical(pathname: string): string {
+  if (!pathname.includes("%")) return pathname;
+  return pathname.replace(ESCAPE, (e) => {
+    const c = String.fromCharCode(parseInt(e.slice(1), 16));
+    return UNRESERVED.test(c) ? c : e.toUpperCase();
+  });
+}
 
 export function buildRoutes<S = Record<string, unknown>>(
   manifest: RouteManifest<S>,
 ): Route<S>[] {
   const out: Route<S>[] = [];
+  const shapes = new Map<string, string>();
   for (const [file, load] of Object.entries(manifest)) {
-    const pattern = filePathToPattern(file);
-    const urlPattern = new URLPattern({ pathname: pattern });
+    const { pattern, shape, literal, score } = parse(file);
+    // Which of two such files answered used to depend on the order they were
+    // listed in, with no word about the other.
+    const twin = shapes.get(shape);
+    if (twin) throw new Error(`fu: ${twin} and ${file} both answer ${pattern}; remove one`);
+    shapes.set(shape, file);
     out.push({
       pattern,
-      urlPattern,
+      urlPattern: new URLPattern({ pathname: pattern }),
       load,
-      score: pattern.includes("*") ? 2 : pattern.includes(":") ? 1 : 0,
-      literal: PATTERN_SYNTAX.test(pattern) ? null : urlPattern.pathname,
+      score,
+      literal: literal === null ? null : asPathname(literal),
       segments: countSegments(pattern),
     });
   }
@@ -107,6 +164,7 @@ export function match<S = Record<string, unknown>>(
   routes: Route<S>[],
   pathname: string,
 ): Matched<S> | null {
+  pathname = canonical(pathname);
   const n = countSegments(pathname);
   const input = "http://x" + pathname;
   for (const route of routes) {

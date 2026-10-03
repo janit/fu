@@ -1,6 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { h } from "preact";
-import { createHandler, document } from "./render.ts";
+import { Component, h } from "preact";
+import { createHandler, document, onlyHosts } from "./render.ts";
 import { App } from "./app.ts";
 import { HttpError } from "./errors.ts";
 import type { Assets, Ctx, RouteManifest } from "./types.ts";
@@ -154,10 +154,26 @@ Deno.test("a handler returning a Response short-circuits rendering", async () =>
   assertEquals(await res.text(), "made");
 });
 
-Deno.test("a route with handlers but no component is not renderable", async () => {
-  // The handler returned data rather than a Response, and there is no default
-  // export to render it with.
-  assertEquals((await get(createHandler({ manifest, assets }), "/nopage")).status, 404);
+Deno.test("a handler that returns data with no page to render it is a 500, not a 404", async () => {
+  // The handler ran, side effects and all, so "Not Found" would be a lie; a
+  // forgotten `return` in an API route is the usual cause.
+  const origError = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => logged.push(...a);
+  try {
+    assertEquals((await get(createHandler({ manifest, assets }), "/nopage")).status, 500);
+  } finally {
+    console.error = origError;
+  }
+  assertStringIncludes(String(logged.find((e) => e instanceof Error)), "no page");
+});
+
+Deno.test("only a route's own handlers answer, not what an object inherits", async () => {
+  const handler = createHandler({ manifest, assets });
+  for (const method of ["toString", "constructor", "valueOf", "hasOwnProperty"]) {
+    const res = await handler(new Request("http://x/", { method }));
+    assertEquals(res.status, 405, method);
+  }
 });
 
 Deno.test("middleware runs before routing, so params are empty inside it", async () => {
@@ -381,4 +397,111 @@ Deno.test("an error page that itself throws falls back instead of masking", asyn
   const res = await get(handler, "/boom");
   assertEquals(res.status, 500);
   assertStringIncludes(await res.text(), "500 Internal Server Error");
+});
+
+Deno.test("the error page's response is uncacheable too", async () => {
+  const handler = createHandler({ manifest: failing, assets, ErrorPage });
+  for (const path of ["/nothing", "/boom"]) {
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      assertEquals((await get(handler, path)).headers.get("cache-control"), "no-store", path);
+    } finally {
+      console.error = origError;
+    }
+  }
+});
+
+Deno.test("an island written as a class renders inside its marker", async () => {
+  class Cls extends Component<{ n: number }> {
+    render() {
+      return h("b", null, String(this.props.n));
+    }
+  }
+  (Cls as unknown as { __island: string }).__island = "/islands/Cls.tsx";
+  const handler = createHandler({
+    manifest: { "/routes/index.tsx": () => Promise.resolve({ default: () => h(Cls, { n: 3 }) }) },
+    assets,
+  });
+  const res = await get(handler, "/");
+  assertEquals(res.status, 200);
+  const html = await res.text();
+  assertStringIncludes(html, 'data-island="/islands/Cls.tsx"');
+  assertStringIncludes(html, "<b>3</b>");
+});
+
+Deno.test("an island rendered inside another island belongs to the outer one", async () => {
+  // Its own marker would make the client hydrate it twice: once as part of the
+  // outer island, and once more into the node that hydration just replaced.
+  const Inner = (props: { n: number }) => h("i", null, String(props.n));
+  (Inner as unknown as { __island: string }).__island = "/islands/Inner.tsx";
+  const Outer = () => h("section", null, h(Inner, { n: 1 }));
+  (Outer as unknown as { __island: string }).__island = "/islands/Outer.tsx";
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({ default: () => h("div", null, h(Outer, null), h(Inner, { n: 2 })) }),
+    },
+    assets,
+  });
+  const html = await (await get(handler, "/")).text();
+  assertStringIncludes(html, "<section><i>1</i></section>");
+  assertEquals(html.match(/data-island="[^"]+"/g), [
+    'data-island="/islands/Outer.tsx"',
+    'data-island="/islands/Inner.tsx"',
+  ]);
+});
+
+Deno.test("a dev server answers only to the names it was started for", async () => {
+  // A page on another site can point its own domain at 127.0.0.1 and read the
+  // dev server through it; the Host header is what gives that away.
+  const guarded = onlyHosts(() => Promise.resolve(new Response("ok")), ["localhost", "127.0.0.1"]);
+  const status = async (url: string) => (await guarded(new Request(url))).status;
+  assertEquals(await status("http://localhost:1337/"), 200);
+  assertEquals(await status("http://127.0.0.1:1337/"), 200);
+  assertEquals(await status("http://acme.localhost:1337/"), 200);
+  assertEquals(await status("http://attacker.example:1337/"), 403);
+  assertEquals(await status("http://localhost.attacker.example:1337/"), 403);
+});
+
+Deno.test("the islands a page rendered are preloaded, and only those", async () => {
+  // Otherwise the browser learns of an island's chunk only after the entry
+  // has downloaded and run: one more round trip before anything hydrates.
+  const Used = () => h("b", null, "x");
+  (Used as unknown as { __island: string }).__island = "/islands/W.tsx#Used";
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () => Promise.resolve({ default: () => h("p", null, h(Used, null)) }),
+      "/routes/plain.tsx": () => Promise.resolve({ default: () => h("p", null) }),
+    },
+    assets: {
+      ...assets,
+      islands: { "/islands/W.tsx": "/_fu/W-abc.js", "/islands/Other.tsx": "/_fu/Other-def.js" },
+    },
+  });
+  const home = await (await get(handler, "/")).text();
+  assertStringIncludes(home, '<link rel="modulepreload" href="/_fu/W-abc.js">');
+  assertEquals(home.includes("Other-def"), false);
+  assertEquals((await (await get(handler, "/plain")).text()).includes("modulepreload"), false);
+});
+
+Deno.test("a function deep inside an island's props is refused too", async () => {
+  const Island = (_props: { a: unknown }) => h("i", null);
+  (Island as unknown as { __island: string }).__island = "/islands/D.tsx";
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({ default: () => h(Island, { a: [{ pick: () => {} }] }) }),
+    },
+    assets,
+  });
+  const origError = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => logged.push(...a);
+  try {
+    assertEquals((await get(handler, "/")).status, 500);
+  } finally {
+    console.error = origError;
+  }
+  assertStringIncludes(String(logged.find((e) => e instanceof Error)), 'prop "pick"');
 });

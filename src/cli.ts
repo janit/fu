@@ -6,12 +6,24 @@ import { build } from "./build.ts";
 import { dev } from "./dev.ts";
 import type { FuOptions } from "./types.ts";
 
-const USAGE = "usage: fu [dev|build] [root] [--port N] [--host H]";
+const USAGE = `usage: fu [dev|build] [root] [--port N] [--host H]
+  fu dev [root]     serve with HMR (the default command); --port and --host apply here
+  fu build [root]   build for production into <root>/.output
+  fu --version`;
+
+export type Command = "dev" | "build" | "help" | "version";
 
 /** Parse the command line. Throws with a message fit for the terminal. */
-export function parseArgs(argv: string[]): { cmd: "dev" | "build"; opts: FuOptions } {
-  const [cmd = "dev", ...rest] = argv;
-  if (cmd !== "dev" && cmd !== "build") throw new Error(`unknown command "${cmd}"\n${USAGE}`);
+export function parseArgs(argv: string[]): { cmd: Command; opts: FuOptions } {
+  if (argv.includes("--help") || argv.includes("-h")) return { cmd: "help", opts: noOpts() };
+  if (argv.includes("--version")) return { cmd: "version", opts: noOpts() };
+  // `fu --port 3000`: flags with no command are for the default one.
+  const [cmd, ...rest] = argv[0] === undefined || argv[0].startsWith("--")
+    ? ["dev", ...argv]
+    : argv;
+  if (cmd !== "dev" && cmd !== "build") {
+    throw new Error(`unknown command "${cmd}" (to serve a project: fu dev ${cmd})\n${USAGE}`);
+  }
   const flags: Record<string, string> = {};
   const positional: string[] = [];
   for (let i = 0; i < rest.length; i++) {
@@ -25,13 +37,18 @@ export function parseArgs(argv: string[]): { cmd: "dev" | "build"; opts: FuOptio
     // for the project root, and a root with no routes served 404 for everything.
     const [name, value] = eq === -1 ? [a.slice(2), rest[++i]] : [a.slice(2, eq), a.slice(eq + 1)];
     if (name !== "port" && name !== "host") throw new Error(`unknown flag --${name}\n${USAGE}`);
-    if (value === undefined || value === "") throw new Error(`--${name} needs a value`);
+    // `--host --port 3000` would otherwise bind to a host called "--port".
+    if (value === undefined || value === "" || value.startsWith("--")) {
+      throw new Error(`--${name} needs a value`);
+    }
+    if (cmd === "build") throw new Error(`--${name} only applies to dev`);
     flags[name] = value;
   }
   if (positional.length > 1) throw new Error(`one project root, got ${positional.join(" ")}`);
   let port: number | undefined;
   if (flags.port !== undefined) {
-    port = Number(flags.port);
+    // Digits only: Number() also takes "0x50", "1e3" and " 80".
+    port = /^\d+$/.test(flags.port) ? Number(flags.port) : NaN;
     if (!Number.isInteger(port) || port < 1 || port > 65534) {
       throw new Error(`--port must be a port number (the HMR socket takes the next one)`);
     }
@@ -39,9 +56,25 @@ export function parseArgs(argv: string[]): { cmd: "dev" | "build"; opts: FuOptio
   return { cmd, opts: { root: positional[0] ?? process.cwd(), port, hostname: flags.host } };
 }
 
+function noOpts(): FuOptions {
+  return { root: process.cwd(), port: undefined, hostname: undefined };
+}
+
+/** The version in the package.json this file ships under. */
+function version(): string {
+  try {
+    const pkg = new URL("../package.json", import.meta.url);
+    return JSON.parse(fs.readFileSync(pkg, "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export async function main(argv: string[]): Promise<void> {
   const { cmd, opts } = parseArgs(argv);
-  if (cmd === "build") await build(opts);
+  if (cmd === "help") console.log(USAGE);
+  else if (cmd === "version") console.log(version());
+  else if (cmd === "build") await build(opts);
   else await dev(opts);
 }
 

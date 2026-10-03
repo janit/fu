@@ -1,4 +1,4 @@
-import { type FunctionComponent, h, hydrate, render } from "preact";
+import { type ComponentType, type FunctionComponent, h, hydrate, render } from "preact";
 
 type Props = Record<string, unknown>;
 
@@ -35,10 +35,19 @@ function proxyFor(key: string, impl: FunctionComponent<Props>): IslandProxy {
   // `__hmr` is a cache-buster: bumping it makes Preact re-render this instance
   // (same type, so hooks survive) and pick up the swapped implementation. It is
   // stripped before reaching the island.
-  const Component = ({ __hmr: _ignored, ...props }: Props) => holder.current(props);
+  // A class cannot be called, so it is rendered as a child instead; its state
+  // then lives under its own type and does not survive a hot swap.
+  const Component = ({ __hmr: _ignored, ...props }: Props) =>
+    isClass(holder.current)
+      ? h(holder.current as ComponentType<Props>, props)
+      : holder.current(props);
   const entry: IslandProxy = { Component, impl: holder };
   proxies.set(key, entry);
   return entry;
+}
+
+function isClass(c: unknown): boolean {
+  return typeof (c as { prototype?: { render?: unknown } }).prototype?.render === "function";
 }
 
 type IslandModule = Record<string, unknown>;
@@ -60,6 +69,9 @@ function componentOf(mod: IslandModule, name: string): FunctionComponent<Props> 
  * Every distinct island module is fetched at once, then the markers are
  * hydrated in document order; awaiting each in turn would serialise one
  * network round-trip per island.
+ *
+ * Islands are independent: one whose chunk fails to load, or that throws while
+ * hydrating, is reported and skipped, and the rest of the page still works.
  */
 export async function hydrateIslands(
   manifest: Record<string, () => Promise<IslandModule>>,
@@ -70,7 +82,12 @@ export async function hydrateIslands(
     await Promise.all(files.map(async (file) => {
       const loader = manifest[file];
       if (!loader) console.warn("[fu] no island module for", file);
-      return [file, loader ? await loader() : null] as const;
+      try {
+        return [file, loader ? await loader() : null] as const;
+      } catch (err) {
+        console.error(`[fu] ${file} failed to load; its islands stay static`, err);
+        return [file, null] as const;
+      }
     })),
   );
   for (const el of els) {
@@ -82,8 +99,14 @@ export async function hydrateIslands(
       if (mod) console.warn(`[fu] ${file} has no component exported as ${name}`);
       continue;
     }
-    const props = JSON.parse(el.dataset.props || "{}") as Props;
-    hydrate(h(proxyFor(key, impl).Component, props), el);
+    let props: Props;
+    try {
+      props = JSON.parse(el.dataset.props || "{}") as Props;
+      hydrate(h(proxyFor(key, impl).Component, props), el);
+    } catch (err) {
+      console.error(`[fu] ${key} failed to hydrate`, err);
+      continue;
+    }
     const list = mounted.get(key) ?? [];
     list.push({ el, props });
     mounted.set(key, list);

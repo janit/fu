@@ -3,19 +3,35 @@ import type { Plugin } from "rolldown";
 import { parseSync, transformSync } from "rolldown/experimental";
 import { transform as lightning } from "lightningcss";
 
-/** Files a source transform must never touch. */
-function isInternal(id: string): boolean {
-  return id.includes("node_modules") ||
-    id.startsWith("\0") ||
-    id.includes("rolldown") ||
-    id.endsWith("hmr-runtime.js");
-}
-
 export interface JsxOptions {
+  /**
+   * Project root. What a file is — an island, a dependency — is read from its
+   * path below this, never from the absolute path: a project checked out under
+   * `~/islands/` or `~/rolldown-demo/` is still just a project.
+   */
+  root?: string;
   /** Stamp island exports with their module id (SSR build only). */
   stampIslands?: boolean;
   /** Inject `import.meta.hot.accept` into islands (dev client only). */
   hmr?: boolean;
+}
+
+/** `id` relative to `root` with forward slashes, or null when it lies outside. */
+function within(root: string | undefined, id: string): string | null {
+  if (!root) return null;
+  const file = id.split("?")[0].replaceAll("\\", "/");
+  const base = root.replaceAll("\\", "/").replace(/\/+$/, "") + "/";
+  return file.startsWith(base) ? file.slice(base.length) : null;
+}
+
+/**
+ * Files a source transform must never touch: dependencies, and rolldown's own
+ * virtual modules (its runtime is `\0rolldown/runtime.js`), whose internal
+ * symbols a transform strips.
+ */
+function isInternal(id: string, root?: string): boolean {
+  if (id.startsWith("\0") || id.endsWith("hmr-runtime.js")) return true;
+  return /(^|[\\/])node_modules[\\/]/.test(within(root, id) ?? id);
 }
 
 /**
@@ -31,14 +47,14 @@ export function jsx(opts: JsxOptions = {}): Plugin {
       handler(code, id) {
         // Mangling rolldown's own runtime module breaks its internal symbols
         // (RUNTIME_MODULE_SYMBOL_NOT_FOUND), so bail on anything internal.
-        if (isInternal(id)) return null;
+        if (isInternal(id, opts.root)) return null;
         const out = transformSync(id, code, {
           jsx: { runtime: "automatic", importSource: "preact" },
           lang: /\.tsx$/.test(id) ? "tsx" : /\.ts$/.test(id) ? "ts" : "jsx",
         });
         let js = out.code;
         let map = out.map ?? null;
-        const islandKey = islandKeyOf(id);
+        const islandKey = islandKeyOf(id, opts.root);
         if (islandKey) {
           if (opts.stampIslands) {
             const stamped = stampIslands(js, islandKey, id);
@@ -54,9 +70,10 @@ export function jsx(opts: JsxOptions = {}): Plugin {
   };
 }
 
-function islandKeyOf(id: string): string | null {
-  const i = id.indexOf("/islands/");
-  return i === -1 ? null : "/islands/" + id.slice(i + "/islands/".length).split("?")[0];
+/** `/islands/C.tsx` for a file under the project's `islands/`, else null. */
+function islandKeyOf(id: string, root?: string): string | null {
+  const rel = within(root, id);
+  return rel?.startsWith("islands/") ? "/" + rel : null;
 }
 
 /** Minimal slice of the oxc AST this file walks. */
@@ -198,8 +215,11 @@ export function css(collected: Map<string, string>, onChange?: () => void): Plug
         if (!isModule) return { code: `export default {};\n${stamp}`, map: null };
         // `composes` yields SEVERAL class names; dropping the extras loses the
         // composed styles with no error.
+        // Sorted: lightningcss lists the exports in no fixed order, and that
+        // order would reach the chunk hash and rename every client file on
+        // about half of all rebuilds of unchanged source.
         const names = Object.fromEntries(
-          Object.entries(out.exports ?? {}).map(([k, v]) => [
+          Object.entries(out.exports ?? {}).sort(([a], [b]) => a < b ? -1 : 1).map(([k, v]) => [
             k,
             [v.name, ...(v.composes ?? []).map((c) => (c as { name: string }).name)].join(" "),
           ]),

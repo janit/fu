@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { HttpError, statusText, toRouteError } from "./errors.ts";
 
 Deno.test("HttpError carries a status and a default message", () => {
@@ -69,4 +69,14 @@ Deno.test("an HttpError over 500 keeps its own message, because the app wrote it
   // HttpError is constructed by the app itself, so its message is trusted; the
   // rule only guards messages that arrived from somewhere else.
   assertEquals(toRouteError(new HttpError(500, "custom")).message, "custom");
+});
+
+Deno.test("HttpError refuses a status that is not an error", () => {
+  // 204 and 304 cannot carry the body the renderer attaches, and the failure
+  // surfaced as an unrelated RangeError from the Response constructor.
+  for (const status of [99, 200, 204, 304, 600, 404.5, NaN]) {
+    assertThrows(() => new HttpError(status), RangeError, "400");
+  }
+  assertEquals(new HttpError(400).status, 400);
+  assertEquals(new HttpError(599).status, 599);
 });

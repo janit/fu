@@ -68,7 +68,7 @@ Deno.test("jsx never touches node_modules, virtual modules or rolldown's runtime
 
 Deno.test("island exports are stamped for the SSR renderer", () => {
   const out = run(
-    jsx({ stampIslands: true }),
+    jsx({ stampIslands: true, root: "/p" }),
     "export default function Counter() { return null; }",
     "/p/islands/Counter.tsx",
   )!;
@@ -78,14 +78,14 @@ Deno.test("island exports are stamped for the SSR renderer", () => {
 Deno.test("stamping only applies to islands, and only with the flag", () => {
   const src = "export default function C() { return null; }";
   assertEquals(
-    run(jsx({ stampIslands: true }), src, "/p/routes/a.tsx")!.code.includes("__island"),
+    run(jsx({ stampIslands: true, root: "/p" }), src, "/p/routes/a.tsx")!.code.includes("__island"),
     false,
   );
   assertEquals(run(jsx(), src, "/p/islands/C.tsx")!.code.includes("__island"), false);
 });
 
 Deno.test("every export form an island can use gets stamped", () => {
-  const p = jsx({ stampIslands: true });
+  const p = jsx({ stampIslands: true, root: "/p" });
   const stamp = (src: string) => run(p, src, "/p/islands/C.tsx")!.code;
   // The regex this replaced only caught `export function`, so an arrow
   // component rendered and then silently never hydrated.
@@ -99,7 +99,7 @@ Deno.test("every export form an island can use gets stamped", () => {
 });
 
 Deno.test("each export is keyed by its exported name, so the client picks the right one", () => {
-  const p = jsx({ stampIslands: true });
+  const p = jsx({ stampIslands: true, root: "/p" });
   const stamp = (src: string) => run(p, src, "/p/islands/W.tsx")!.code;
   const two = stamp("export const Counter = () => null; export const Toggle = () => null;");
   assertStringIncludes(two, 'Counter.__island="/islands/W.tsx#Counter"');
@@ -119,7 +119,11 @@ Deno.test("each export is keyed by its exported name, so the client picks the ri
 });
 
 Deno.test("an anonymous default export is named so it can be stamped", () => {
-  const out = run(jsx({ stampIslands: true }), "export default () => null;", "/p/islands/C.tsx")!;
+  const out = run(
+    jsx({ stampIslands: true, root: "/p" }),
+    "export default () => null;",
+    "/p/islands/C.tsx",
+  )!;
   assertStringIncludes(out.code, "const __fu_default =");
   assertStringIncludes(out.code, "export default __fu_default;");
   assertStringIncludes(out.code, '__fu_default.__island="/islands/C.tsx"');
@@ -128,7 +132,7 @@ Deno.test("an anonymous default export is named so it can be stamped", () => {
 });
 
 Deno.test("things with no runtime binding are never stamped", () => {
-  const p = jsx({ stampIslands: true });
+  const p = jsx({ stampIslands: true, root: "/p" });
   const stamp = (src: string) => run(p, src, "/p/islands/C.tsx")!.code;
   // Re-exports bind nothing locally; types do not exist at runtime.
   assertEquals(stamp('export { X } from "./other.ts";').includes("__island"), false);
@@ -140,7 +144,7 @@ Deno.test("things with no runtime binding are never stamped", () => {
 
 Deno.test("the hmr flag makes an island accept its own updates", () => {
   const out = run(
-    jsx({ hmr: true }),
+    jsx({ hmr: true, root: "/p" }),
     "export default function C() { return null; }",
     "/p/islands/C.tsx",
   )!;
@@ -155,4 +159,40 @@ Deno.test("selfAlias maps the package name and its subpaths onto the runtime dir
   assertEquals(resolve("@janit/fu/errors"), "/fw/src/errors.ts");
   assertEquals(resolve("@janit/fu-other"), null);
   assertEquals(resolve("preact"), null);
+});
+
+Deno.test("what a file is depends on its place in the project, not on words in its path", () => {
+  const src = "export default function C() { return <b>x</b>; }";
+  // A project under a directory called `rolldown-demo` got no transform at all.
+  const demo = jsx({ stampIslands: true, root: "/home/me/rolldown-demo" });
+  assertStringIncludes(
+    run(demo, src, "/home/me/rolldown-demo/routes/a.tsx")!.code,
+    "preact/jsx-runtime",
+  );
+  // A page at /islands is a page, and so is every route of a project that
+  // lives under a directory called `islands`.
+  const p = jsx({ stampIslands: true, root: "/x/islands/app" });
+  const stamped = (id: string) => run(p, src, id)!.code.includes("__island");
+  assertEquals(stamped("/x/islands/app/routes/islands/index.tsx"), false);
+  assertEquals(stamped("/x/islands/app/routes/index.tsx"), false);
+  assertStringIncludes(
+    run(p, src, "/x/islands/app/islands/C.tsx")!.code,
+    'C.__island="/islands/C.tsx"',
+  );
+  assertStringIncludes(
+    run(p, src, "/x/islands/app/islands/sub/D.tsx?v=1")!.code,
+    'C.__island="/islands/sub/D.tsx"',
+  );
+  // The project's own dependencies are still left alone.
+  assertEquals(run(p, src, "/x/islands/app/node_modules/pkg/islands/C.tsx"), null);
+});
+
+Deno.test("a CSS module compiles to the same JS every time", () => {
+  // lightningcss lists the exports in no fixed order, and the order reached the
+  // chunk hash: half of all rebuilds of unchanged source renamed every file.
+  const seen = new Set<string>();
+  for (let i = 0; i < 40; i++) {
+    seen.add(run(css(new Map()), ".button{color:red}.badge{color:blue}", "/z.module.css")!.code);
+  }
+  assertEquals(seen.size, 1);
 });

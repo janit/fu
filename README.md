@@ -24,14 +24,38 @@ It is experimental and primarily just for myself. Use it accordingly.
 
 ## Installing it
 
+On Node (22.12 or later) or Bun:
+
 ```sh
-deno add npm:@janit/fu        # or: npm i @janit/fu
+npm i @janit/fu preact @preact/signals
+npx fu dev          # and: npx fu build
 ```
+
+On Deno 2, the packages have to land in a real `node_modules/`, and the JSX
+settings are yours to give:
+
+```sh
+deno add npm:@janit/fu npm:preact@^11 npm:@preact/signals
+deno run -A npm:@janit/fu/cli dev .
+```
+
+```jsonc
+// deno.json
+{
+  "nodeModulesDir": "auto",
+  "compilerOptions": { "jsx": "react-jsx", "jsxImportSource": "preact" }
+}
+```
+
+`@preact/signals` is an optional peer: leave it out if no island imports it. A
+build fails on an import that resolves to nothing, rather than producing a
+server that cannot start.
 
 npm is the only channel. The framework hands its own runtime modules to
 rolldown, so it must be a real directory on disk, which an npm install is. It
-was on JSR up to 0.0.4 and was withdrawn from there: Deno keeps JSR packages
-as remote `https:` modules, and a bundler cannot fetch one.
+was published to JSR up to 0.0.4 and is no longer updated there, so do not
+install it from JSR: Deno keeps JSR packages as remote `https:` modules, and a
+bundler cannot fetch one.
 
 The npm package ships compiled JavaScript, because Deno refuses to type-strip
 TypeScript inside `node_modules`.
@@ -41,7 +65,7 @@ TypeScript inside `node_modules`.
 ```sh
 npm install        # once: installs the toolchain (rolldown, nitro, lightningcss)
 
-deno task dev      # example app, dev server with HMR on 0.0.0.0:1337
+deno task dev      # example app, dev server with HMR on localhost:1337
 deno task build    # example app, production build
 
 
@@ -52,16 +76,11 @@ deno task check    # format, lint, types (framework and both apps), tests
 The CLI behind those tasks is `fu dev [root] [--port N] [--host H]` and
 `fu build [root]`. The root defaults to the working directory and must contain
 `routes/`. The dev server listens on `--port` (1337) and its HMR socket on the
-port after it; `--host` sets the bind address (0.0.0.0).
-
-Both example apps build against **this checkout's `src/`**, never a published
-package, so the framework and the apps can be changed and tested together
-before anything is released. The drivers make that hold: they alias the
-framework's own package name to the runtime copy they are running from, so an
-app's `import { App } from "@janit/fu"` cannot drift to a stale
-`dist/` through Node's package self-reference. The apps are Deno workspace
-members, so `deno check` sees the same mapping. `npm install` at the root is
-the only setup step; it serves the whole repo.
+port after it. It binds to `127.0.0.1` and answers only to loopback names
+(`localhost`, `127.0.0.1`, any `*.localhost`), because it hands out source and
+stack traces. `--host 0.0.0.0` opens it to the network, for a container or
+another device; `--host <name>` binds and admits that one name. `fu --help` and
+`fu --version` do what they say.
 
 Then run the build on whichever runtime you like — one artifact, three runtimes:
 
@@ -71,14 +90,21 @@ bun  example/.output/server/index.mjs
 deno run -A example/.output/server/index.mjs
 ```
 
+The built server listens on `PORT`, 3000 if unset: `PORT=1337 node ...`.
+
 That holds because `fu build` always uses Nitro's `node-server` preset, whichever
 runtime runs the build. Set `NITRO_PRESET` to build for a specific platform
-instead.
+instead. The portable preset has a price on Deno, where it runs through the
+`node:http` compatibility layer: `NITRO_PRESET=deno-server` cut the CPU cost of
+a request that renders nothing (a JSON API, a middleware short-circuit) by
+about 40%, and made no difference to a rendered page.
 
 A build minifies the client, serves it from `/_fu/` under content-hashed names
-with a year-long `immutable` cache, pre-compresses it (brotli, gzip, zstd) and
-announces the shared chunks as `modulepreload`, so a page's islands start
-loading in one round trip after the HTML. The dev server serves plain names
+with a year-long `immutable` cache, pre-compresses the files big enough to gain
+from it (brotli, gzip, zstd) and
+announces the shared chunks, and the chunks of the islands that page rendered,
+as `modulepreload`, so a page's islands start loading in one round trip after
+the HTML. The dev server serves plain names
 from `/`.
 
 ## Project shape
@@ -97,7 +123,15 @@ islands/Counter.tsx               interactive, hydrated on the client
 islands/counter.module.css        CSS Modules, scoped
 ```
 
-Files under `routes/` starting with `_` are framework files, not routes.
+Every `.ts`, `.tsx`, `.js` and `.jsx` file under `routes/` is a route, except:
+files and directories starting with `_` (framework files, and a place for your
+own helpers, such as `routes/_parts/`), tests (`*_test.*`, `*.test.*`) and
+`.d.ts` files. The same goes for `islands/`.
+
+A file name is taken literally, so `routes/a+b.tsx` answers `/a+b`. A param
+name (`[slug]`, `[...rest]`) must be an identifier; `[my-id]` is refused at
+startup, and so are two files that would answer the same path
+(`blog.tsx` and `blog/index.tsx`).
 
 A route exports a page component, and optionally `handlers`:
 
@@ -112,7 +146,8 @@ export default function About(ctx: PageContext) {
 ```
 
 Return a `Response` from a handler to short-circuit; return anything else and
-it lands on `ctx.data`.
+it lands on `ctx.data`. A route with no page has nothing to render that data
+with, so there a handler must return a `Response`; forgetting to is a 500.
 
 Handlers are keyed by HTTP method. A page renders for `GET` and `HEAD` whether
 or not it has a `GET` handler, so a route with only `POST` still shows its form.
@@ -153,7 +188,9 @@ export default app;
 
 A middleware either returns a `Response` (short-circuiting) or returns
 `ctx.next()`. Await `next()` first to inspect or mutate the response. Throwing
-propagates outward past any `await ctx.next()`.
+propagates outward past any `await ctx.next()`. Pass `ctx` itself along, never
+a copy: its fields are views onto one shared context, and `{ ...ctx }` copies
+none of them.
 
 Middleware runs **before** routing, so `ctx.params` is empty inside it — match
 on `ctx.url.pathname`. That is what lets a middleware answer a request no route
@@ -185,6 +222,7 @@ const connectSrc = dev ? "connect-src 'self' ws://localhost:*" : "connect-src 's
 
 Anything thrown by a handler, a page or a middleware is turned into a response
 rather than reaching the server as an unhandled crash. So are 404 and 405.
+`HttpError` takes a status from 400 to 599.
 
 ```ts
 import { type Handlers, HttpError } from "@janit/fu";
@@ -207,13 +245,17 @@ error pages inherit the app's markup. Without one you get plain text.
 
 Two things the framework does for you:
 
-- **A 500 never renders its underlying message.** `ctx.error.message` is generic
-  for 5xx; the real error goes to `ctx.error.cause` and is logged, because a
-  thrown error's message routinely carries connection strings and file paths.
-  A `4xx` keeps whatever message you gave it.
-- **No failure is cacheable.** Error responses carry `no-store` and `noindex`.
-  During a deploy a valid URL can 404 for a few seconds, and a shared cache
-  would pin that.
+- **An unexpected throw never renders its message.** `ctx.error.message` is
+  generic for it, and for a 5xx from another library; the real error goes to
+  `ctx.error.cause` and is logged, because a thrown error's message routinely
+  carries connection strings and file paths. A message you wrote yourself, in
+  `new HttpError(...)`, is rendered at any status, 5xx included.
+- **No failure the framework renders is cacheable.** Its error responses carry
+  `no-store`, and the error page adds `<meta name="robots" content="noindex">`
+  (the plain-text fallback has no such tag). During a deploy a valid URL can
+  404 for a few seconds, and a shared cache would pin that. The exception is a
+  missing file under `/_fu/`: Nitro answers that itself, as JSON with no cache
+  header, and it never reaches your middleware or error page.
 
 Errors from a handler or a page are caught at the route boundary and returned
 *through* the middleware chain, so security headers and logging middleware still
@@ -232,6 +274,7 @@ write to it too.
 export const handlers = {
   GET: (ctx: PageContext<State>) => {
     ctx.head.title = `${ctx.params.slug} — Fresh Urquell`;
+    // ctx.url.origin echoes the request's Host header; a real site configures its origin.
     ctx.head.canonical = `${ctx.url.origin}/blog/${ctx.params.slug}`;
     ctx.head.jsonLd = { "@context": "https://schema.org", "@type": "BlogPosting" };
     return null;
@@ -261,6 +304,12 @@ hold several. Props travel to the client as JSON: strings, numbers, arrays and
 plain objects cross; a function or JSX element (including JSX `children`) fails
 the render with an error naming the prop, rather than hydrating without it.
 
+An island rendered inside another island is part of the outer one: it hydrates
+with it and gets no boundary of its own. A class component works as an island,
+but its state does not survive a hot swap the way hook state does. Islands
+hydrate independently, so one that throws is reported in the console and the
+rest of the page still works.
+
 ## What works
 
 Routing (static, dynamic and wildcard, via the web-standard `URLPattern`),
@@ -278,7 +327,12 @@ only a route manifest and an asset list, both plain data:
 
 ```ts
 type RouteManifest = Record<string, () => Promise<RouteModule>>;
-type Assets = { js: { href: string }[]; css: { href: string }[] };
+type Assets = {
+  js: { href: string }[];
+  css: { href: string }[];
+  preload?: { href: string }[];
+  islands?: Record<string, string>; // island file -> its chunk's URL
+};
 ```
 
 Everything bundler-specific lives in the drivers (`src/build.ts`, `src/dev.ts`),
@@ -313,46 +367,42 @@ failure modes this framework actually hit, so each one guards a real regression:
 | errors | a 500 never leaks its message; error responses are uncacheable; a broken error page falls back |
 | plugins | `composes` keeps every class name; CSS output changes with content; the JSX transform never touches rolldown's runtime; the package self-alias |
 | driver | the server entry imports only the optional files that exist; the H3Event unwrap |
-| dev | the HMR socket admits only the dev server's own pages, not another site or a rebound name |
+| dev | the HMR socket admits only the dev server's own pages, not another site or a rebound name; a patch is written and sent before it is reported delivered |
+| cli | flags without a command mean dev; a port is decimal and leaves room for the HMR socket; build refuses dev's flags |
 
 Two of these were found by writing the suite, not before it: `ctx.next()` called
 twice resumed at the wrong depth, and a middleware throwing synchronously
 escaped the chain entirely instead of rejecting.
 
-## Publishing
-
-Two public repos ship from this private one, each as a squashed snapshot so no
-private history leaks:
-
-```sh
-./scripts/publish.sh      --dry-run --minor "Describe the release"  # -> janit/fu
-./scripts/publish-todo.sh --dry-run --minor "Describe the release"  # -> janit/fu-todo
-```
-
-`scripts/publish-lib.sh` holds the mechanics: a baseline exclude list that is
-the privacy boundary, a staged-tree backstop that refuses the push if anything
-private reaches the index anyway, semver tagging derived from the public repo's
-existing tags, and version stamping so the git tag and `deno.json` cannot drift.
-`fu-todo/` is stripped from `janit/fu`, and from its Deno workspace; the
-framework specifier is rewritten from `../src/mod.ts` on the way into
-`janit/fu-todo`, which also gets its own `nodeModulesDir` since it is no
-longer a workspace member there. Both flows can be rehearsed against a local
-bare repository by overriding `PUBLIC_REPO`.
-
 ## Known gaps
 
-- HMR works only from the machine running `fu dev`. The dev server is reachable
-  across the network, but its HMR socket accepts pages served from a loopback
-  name only, which is what keeps a DNS-rebinding page from reading your source.
-  A page opened from another machine renders and hydrates, but does not
-  hot-swap.
+- HMR works only from the machine running `fu dev`. With `--host 0.0.0.0` the
+  pages are reachable across the network, but the HMR client always dials
+  `localhost`, and the socket admits only the dev server's own pages, which is
+  what keeps a DNS-rebinding page from reading your source. A page opened from
+  another machine renders and hydrates, but does not hot-swap.
+- HTML responses are not compressed (the built client files are). Put a
+  compressing proxy in front, or compress in a middleware.
+- The dev server's memory grows with every save, inside nitro and rolldown, by
+  a megabyte or a few. Restart it in a long session.
+- A stylesheet whose `import` was removed stays in the dev `/style.css` until
+  the dev server restarts. A build has no such leftovers.
+- A request under `/_fu/` with a method other than GET or HEAD is answered by
+  the app, and Nitro puts the assets' year-long cache header on that 404 or
+  405. No cache stores a response to such a method, so it is left alone.
+- The package exports more than the documented API. `App`, `HttpError`,
+  `statusText` and the types `Handlers`, `Middleware`, `PageContext` and
+  `ShellProps` (the props of `routes/_app.tsx`: `{ ctx, children }`) are the
+  supported surface. The rest (`createHandler`, `compose`, the router, the
+  `./build`, `./dev`, `./render`, `./router`, `./plugins` subpaths) is what the
+  drivers and tests use, and may change in any release.
 - The dev server finds routes and islands once, at start. Editing one
   rebuilds, but a newly added file needs a restart.
 - **Adding or removing a hook** in an island breaks hook order during HMR. It
   does not crash, but needs a manual refresh.
 - An editor that truncates or renames a file on save can be read mid-save. The
-  island then keeps its previous code (with a console warning) until the next
-  save, rather than crashing.
+  island then keeps its previous code (with a console warning) rather than
+  crashing, and that save is lost: save again to apply it.
 - Naming an anonymous `export default () => {}` island shifts source positions,
   so that one module's sourcemap is dropped rather than left wrong.
 - `urlpattern-polyfill` is bundled even on Deno and Bun, which have
@@ -366,8 +416,8 @@ bare repository by overriding `PUBLIC_REPO`.
 
 ## Status
 
-Alpha, and built on deliberately unstable ground: Preact 11 is a release
-candidate, Nitro 3 is beta, and rolldown's `devMode` is marked *"not ready for
-public usage"*. That instability is an accepted trade.
+Alpha, and built on deliberately unstable ground: Preact 11 is days old, Nitro
+3 is beta, and rolldown's `devMode` is marked *"not ready for public usage"*.
+That instability is an accepted trade.
 
 MIT.
