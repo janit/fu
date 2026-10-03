@@ -18,22 +18,39 @@ import type { FuOptions } from "./types.ts";
 /** URL prefix of the built client files. */
 const ASSETS = "/_fu/";
 
+/**
+ * Nitro writes into the output dir without clearing it, so an earlier build's
+ * hashed assets, or a deno.json from another preset, would ship with this one.
+ * The default dir is ours, and so is one nitro made (it leaves nitro.json, but
+ * only at the very end, so a build that died half-way has none). In any other
+ * dir only what this build is about to write is cleared.
+ */
+export function clearOutput(outDir: string, ours: boolean): void {
+  if (ours || fs.existsSync(path.join(outDir, "nitro.json"))) {
+    fs.rmSync(outDir, { recursive: true, force: true });
+    return;
+  }
+  for (const sub of ["public" + ASSETS, "server"]) {
+    fs.rmSync(path.join(outDir, sub), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Nitro would pick a preset from whichever runtime runs the build, and its
+ * deno-server output calls Deno.serve, so `node .output/...` crashes on a
+ * Deno-built artefact. node-server runs on Node, Bun and Deno alike. A
+ * NITRO_PRESET in the environment still wins, for a platform preset: nitro
+ * reads it itself, so the option is simply left out.
+ */
+export function presetOption(fromEnv: string | undefined): { preset?: string } {
+  return fromEnv ? {} : { preset: "node-server" };
+}
+
 export async function build(opts: FuOptions): Promise<void> {
   const project = scanProject(opts.root);
   const outDir = opts.outDir ? path.resolve(opts.outDir) : path.join(project.root, ".output");
 
-  // Nitro writes into the output dir without clearing it, so an earlier
-  // build's hashed assets, or a deno.json from another preset, would ship with
-  // this one. The default dir is ours, and so is one nitro made (it leaves
-  // nitro.json, but only at the very end, so a build that died half-way has
-  // none). In any other dir only what this build is about to write is cleared.
-  if (!opts.outDir || fs.existsSync(path.join(outDir, "nitro.json"))) {
-    fs.rmSync(outDir, { recursive: true, force: true });
-  } else {
-    for (const sub of ["public" + ASSETS, "server"]) {
-      fs.rmSync(path.join(outDir, sub), { recursive: true, force: true });
-    }
-  }
+  clearOutput(outDir, !opts.outDir);
 
   // ---- css ----
   // The stylesheet's hashed name goes into the server entry, but routes and the
@@ -84,11 +101,7 @@ export async function build(opts: FuOptions): Promise<void> {
   }, { assetsPrefix: ASSETS });
   const nitro = await createNitro({
     ...nitroOptions(project, ssrEntry),
-    // Nitro would pick a preset from whichever runtime runs the build, and its
-    // deno-server output calls Deno.serve, so `node .output/...` crashes on a
-    // Deno-built artefact. node-server runs on Node, Bun and Deno alike.
-    // NITRO_PRESET still overrides, for a platform preset.
-    ...(process.env.NITRO_PRESET ? {} : { preset: "node-server" }),
+    ...presetOption(process.env.NITRO_PRESET),
     output: { dir: outDir },
     // Every client file name carries a content hash, so it never changes under
     // the same URL and may be cached for good. Nitro sends max-age only for a

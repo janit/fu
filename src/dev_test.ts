@@ -1,5 +1,11 @@
-import { assertEquals } from "@std/assert";
-import { deliverUpdates, hmrOriginAllowed, hmrUpgrade, liveClientSheets } from "./dev.ts";
+import { assertEquals, assertRejects } from "@std/assert";
+import {
+  deliverUpdates,
+  hmrOriginAllowed,
+  hmrUpgrade,
+  listening,
+  liveClientSheets,
+} from "./dev.ts";
 
 Deno.test("the HMR socket admits the dev server's own pages", () => {
   for (const origin of ["http://localhost:1337", "http://127.0.0.1:1337", "http://[::1]:1337"]) {
@@ -91,4 +97,16 @@ Deno.test("a sheet the server stopped importing is dropped from the client's too
   assertEquals([...liveClientSheets(server, client, seen).keys()], ["/islands/lone.css"]);
   server.set("/islands/i.css", ".i{}");
   assertEquals(liveClientSheets(server, client, seen).has("/islands/i.css"), true);
+});
+
+Deno.test("a server that could not listen stops the dev server, saying which and why", async () => {
+  // Node reports a failed listen out of band and carries on: the dev server
+  // used to print its address with nothing answering on it.
+  const taken = { ready: () => Promise.reject(new Error("listen EADDRINUSE")) };
+  await assertRejects(
+    () => listening(taken, "the dev server", "127.0.0.1", 1337),
+    Error,
+    "the dev server could not listen on 127.0.0.1:1337 (listen EADDRINUSE)",
+  );
+  await listening({ ready: () => Promise.resolve() }, "the dev server", "127.0.0.1", 1337);
 });

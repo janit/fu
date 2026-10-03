@@ -60,12 +60,12 @@ function isClass(c: unknown): boolean {
 type IslandModule = Record<string, unknown>;
 
 /** `/islands/W.tsx#Toggle` -> ["/islands/W.tsx", "Toggle"]; no `#` means the default export. */
-function splitKey(key: string): [file: string, name: string] {
+export function splitKey(key: string): [file: string, name: string] {
   const i = key.indexOf("#");
   return i === -1 ? [key, "default"] : [key.slice(0, i), key.slice(i + 1)];
 }
 
-function componentOf(mod: IslandModule, name: string): FunctionComponent<Props> | null {
+export function componentOf(mod: IslandModule, name: string): FunctionComponent<Props> | null {
   const c = mod[name];
   return typeof c === "function" ? c as FunctionComponent<Props> : null;
 }

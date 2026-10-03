@@ -111,6 +111,29 @@ export function liveClientSheets(
   return new Map([...client].filter(([id]) => server.has(id) || !seen.has(id)));
 }
 
+/**
+ * Wait until a server is listening, or fail saying which one could not. Node
+ * reports a failed listen out of band and carries on, so without this the dev
+ * server would announce an address nothing answers on, or serve pages with
+ * hot reload silently dead.
+ */
+export async function listening(
+  server: { ready(): Promise<unknown> },
+  what: string,
+  hostname: string,
+  port: number,
+): Promise<void> {
+  try {
+    await server.ready();
+  } catch (err) {
+    throw new Error(
+      `${what} could not listen on ${hostname}:${port} (${
+        err instanceof Error ? err.message : err
+      })`,
+    );
+  }
+}
+
 /** Addresses that mean "every interface", where any Host name may be legitimate. */
 const ANY = new Set(["0.0.0.0", "::", "[::]"]);
 
@@ -215,16 +238,7 @@ export async function dev(opts: FuOptions): Promise<void> {
       },
     } as Parameters<typeof serve>[0],
   );
-  // Node reports a failed listen out of band and carries on, so the pages
-  // would be served with hot reload silently dead. Wait for it, and stop.
-  try {
-    await socket.ready();
-  } catch (err) {
-    throw new Error(
-      `the HMR socket could not listen on ${hostname}:${hmrPort} ` +
-        `(${err instanceof Error ? err.message : err}); it takes the port above --port`,
-    );
-  }
+  await listening(socket, "the HMR socket (it takes the port above --port)", hostname, hmrPort);
 
   // SSR.
   const ssrEntry = writeSsrEntry(
@@ -243,8 +257,8 @@ export async function dev(opts: FuOptions): Promise<void> {
     }),
     dev: true,
   });
-  const server = createDevServer(nitro);
-  server.listen({ port, hostname });
+  const server = createDevServer(nitro).listen({ port, hostname });
+  await listening(server, "the dev server", hostname, port);
   // Order matters: listen -> prepare -> build. `build` starts the dev runner.
   await prepare(nitro);
   await nitroBuild(nitro);

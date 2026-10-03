@@ -80,3 +80,12 @@ Deno.test("HttpError refuses a status that is not an error", () => {
   assertEquals(new HttpError(400).status, 400);
   assertEquals(new HttpError(599).status, 599);
 });
+
+Deno.test("the message boundary sits exactly between 499 and 500", () => {
+  const foreign = (status: number) => toRouteError({ status, message: "db at /var/secret" });
+  assertEquals(foreign(499).message, "db at /var/secret");
+  assertEquals(foreign(500).message, "Internal Server Error");
+  // And the status boundary of HttpError itself.
+  assertThrows(() => new HttpError(399), RangeError);
+  assertThrows(() => new HttpError(600), RangeError);
+});
