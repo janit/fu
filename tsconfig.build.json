@@ -8,6 +8,7 @@
     "jsxImportSource": "preact",
     "strict": true,
     "declaration": true,
+    "stripInternal": true,
     "sourceMap": true,
     "inlineSources": true,
     "outDir": "dist",
@@ -18,5 +19,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*_test.ts"]
+  "exclude": ["src/**/*_test.ts", "src/_fixtures/**"]
 }

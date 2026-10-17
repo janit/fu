@@ -9,7 +9,7 @@ import type { Ctx, Middleware } from "./types.ts";
  * without calling `ctx.next()` short-circuits everything beneath it.
  *
  * One ctx is shared by the whole chain: every level reads and writes the same
- * fields, so what the router writes (`params`, `data`, `error`) is visible to
+ * fields, so what the router writes (`params`, `rawParams`, `data`, `error`) is visible to
  * every middleware on the way out, however deep the chain. Only `next` is
  * per-level.
  */
@@ -28,7 +28,21 @@ function mustBeResponse(res: unknown): Response {
 }
 
 const ROOT = Symbol("fu.root");
-const FIELDS = ["req", "url", "params", "state", "head", "data", "error"] as const;
+const FIELDS = [
+  "req",
+  "url",
+  "params",
+  "rawParams",
+  "state",
+  "head",
+  "data",
+  "error",
+  "response",
+  "partial",
+  "env",
+  "waitUntil",
+  "assets",
+] as const;
 
 /**
  * Prototype for the per-level view: each field forwards to the root ctx. Built

@@ -59,6 +59,17 @@ function isClass(c: unknown): boolean {
 
 type IslandModule = Record<string, unknown>;
 
+/** Set (empty) on `<html>` once the islands the page loaded with are hydrated. */
+export const HYDRATED_ATTR = "data-fu-hydrated";
+/** Dispatched on `window` at the same moment, once per document. */
+export const HYDRATED_EVENT = "fu:hydrated";
+
+/** The boot module calls this when the first `hydrateIslands` pass is over. */
+export function markHydrated(): void {
+  document.documentElement.setAttribute(HYDRATED_ATTR, "");
+  dispatchEvent(new Event(HYDRATED_EVENT));
+}
+
 /** `/islands/W.tsx#Toggle` -> ["/islands/W.tsx", "Toggle"]; no `#` means the default export. */
 export function splitKey(key: string): [file: string, name: string] {
   const i = key.indexOf("#");
@@ -79,11 +90,18 @@ export function componentOf(mod: IslandModule, name: string): FunctionComponent<
  *
  * Islands are independent: one whose chunk fails to load, or that throws while
  * hydrating, is reported and skipped, and the rest of the page still works.
+ *
+ * No record is kept of what was hydrated (the boot module pays for every byte
+ * here, on every page): an element must be passed once. The boot module
+ * passes every marker of the loaded page; the navigation runtime passes the
+ * markers that arrived with a swap, which are new elements.
  */
 export async function hydrateIslands(
   manifest: Record<string, () => Promise<IslandModule>>,
+  /** The marker elements to hydrate. Default: every one in the document. */
+  markers: Iterable<HTMLElement> = document.querySelectorAll<HTMLElement>("[data-island]"),
 ): Promise<void> {
-  const els = [...document.querySelectorAll<HTMLElement>("[data-island]")];
+  const els = [...markers];
   const files = [...new Set(els.map((el) => splitKey(el.dataset.island!)[0]))];
   const modules = new Map(
     await Promise.all(files.map(async (file) => {
@@ -98,6 +116,9 @@ export async function hydrateIslands(
     })),
   );
   for (const el of els) {
+    // Swapped out by a navigation while its module was loading: an island
+    // mounted into a node that left the document would never be unmounted.
+    if (!el.isConnected) continue;
     const key = el.dataset.island!;
     const [file, name] = splitKey(key);
     const mod = modules.get(file);
@@ -128,7 +149,10 @@ function installHmrHook(): void {
   (globalThis as Record<string, unknown>).__fu_hmr__ = (file: string, mod: IslandModule): void => {
     const stamp = ++hmrVersion;
     let own = false;
-    for (const [key, list] of mounted) {
+    for (const [key, all] of mounted) {
+      // Forget the elements a navigation swapped out since.
+      const list = all.filter((m) => m.el.isConnected);
+      mounted.set(key, list);
       const [keyFile, name] = splitKey(key);
       if (keyFile !== file || !list.length) continue;
       own = true;

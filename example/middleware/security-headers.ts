@@ -1,4 +1,3 @@
-import process from "node:process";
 import type { Middleware } from "@janit/fu";
 import type { State } from "../state.ts";
 
@@ -6,23 +5,27 @@ import type { State } from "../state.ts";
  * Strict, because the framework allows it: every script the shell emits is an
  * external module with a `src`, and nothing writes an inline `<style>`. The
  * JSON-LD block is data, not script, so CSP leaves it alone. Only dev needs
- * more: the HMR socket is on port+1, a different origin.
+ * more: the HMR socket is on port+1, a different origin. `fu dev` says so in
+ * the environment, which reaches the app as `ctx.env` on every runtime.
  */
-const CSP = [
-  "default-src 'self'",
-  process.env.FU_DEV === "1" ? "connect-src 'self' ws://localhost:*" : "connect-src 'self'",
-  "base-uri 'none'",
-  "object-src 'none'",
-  "frame-ancestors 'none'",
-].join("; ");
+const csp = (dev: boolean) =>
+  [
+    "default-src 'self'",
+    dev ? "connect-src 'self' ws://localhost:*" : "connect-src 'self'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+  ].join("; ");
 
-const HEADERS: ReadonlyArray<[string, string]> = [
-  ["Content-Security-Policy", CSP],
+const headers = (dev: boolean): ReadonlyArray<[string, string]> => [
+  ["Content-Security-Policy", csp(dev)],
   // DENY, to say the same as frame-ancestors 'none'.
   ["X-Frame-Options", "DENY"],
   ["X-Content-Type-Options", "nosniff"],
   ["Referrer-Policy", "strict-origin-when-cross-origin"],
 ];
+const PROD = headers(false);
+const DEV = headers(true);
 
 /**
  * Registered first so it unwinds last: no inner middleware can clobber these,
@@ -30,7 +33,7 @@ const HEADERS: ReadonlyArray<[string, string]> = [
  */
 export const securityHeaders: Middleware<State> = async (ctx) => {
   const res = await ctx.next();
-  for (const [k, v] of HEADERS) res.headers.set(k, v);
+  for (const [k, v] of ctx.env.FU_DEV === "1" ? DEV : PROD) res.headers.set(k, v);
   return res;
 };
 

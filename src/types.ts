@@ -7,13 +7,18 @@ export interface Asset {
 export interface Assets {
   js: Asset[];
   css: Asset[];
-  /** Modules the entry will import, announced early as `modulepreload`. */
+  /**
+   * Modules every page will fetch, announced on every page as `modulepreload`:
+   * in a build, what the entry imports statically.
+   */
   preload?: Asset[];
   /**
-   * Island file ("/islands/Counter.tsx") to the URL of its chunk. A page
-   * preloads the chunks of the islands it rendered.
+   * Island file ("/islands/Counter.tsx") to what a page that renders it
+   * preloads: the URL of its chunk, or a list, the chunk first and then the
+   * chunks that one imports statically. A page names each URL once, however
+   * many of its islands list it: the imported chunks, then the islands' own.
    */
-  islands?: Record<string, string>;
+  islands?: Record<string, string | string[]>;
 }
 
 /**
@@ -31,7 +36,11 @@ export interface Head {
   robots?: string;
   /** og:image URL. */
   image?: string;
-  /** `<html lang>`; defaults to "en". */
+  /**
+   * `<html lang>` of the document fu writes; defaults to "en". A shell that
+   * owns the document (returns `<html>`) writes its own `lang`: this field is
+   * then emitted nowhere.
+   */
   lang?: string;
   /** Raw `<link>` descriptors, e.g. hreflang alternates or preloads. */
   links?: Record<string, string>[];
@@ -50,12 +59,68 @@ export interface RouteError {
   cause?: unknown;
 }
 
+/**
+ * Status and headers for a rendered page, written by a handler or middleware
+ * and applied by the renderer. Ignored when a handler returns a `Response`
+ * (that Response is authoritative) and on the error path (an error response
+ * is built from the error alone, so a handler that set `Cache-Control:
+ * public` and then threw cannot make a 404 cacheable).
+ */
+export interface ResponseOverride {
+  /**
+   * Status of the rendered page. Default 200. Must be 200 to 599, except 204,
+   * 205 and 304, which cannot carry a body: those fail the render with a
+   * RangeError. A status of 400 or more forces cache-control: no-store.
+   */
+  status: number;
+  /** Headers merged onto the rendered page's response (set-cookie is appended, others set). */
+  headers: Headers;
+}
+
+/**
+ * The bindings the runtime hands the app: on celld, the Worker's `env` (vars,
+ * KV, Durable Object namespaces, `ASSETS`); under `serve.mjs`, the process
+ * environment. Augment it to type an app's own bindings:
+ * `declare module "@janit/fu" { interface Env { API_URL: string } }`.
+ */
+export interface Env {
+  [key: string]: unknown;
+}
+
+/**
+ * Where static files come from: celld's assets binding, or `assetsFromDir()`
+ * under `serve.mjs` and `fu dev`. The shape of a Workers `Fetcher`, as far as
+ * reading files goes.
+ */
+export interface AssetStore {
+  fetch(input: Request | string | URL): Promise<Response>;
+}
+
+/** What the runtime passes beside the request. Every field is optional. */
+export interface RequestExtra {
+  env?: Env;
+  waitUntil?(promise: Promise<unknown>): void;
+  assets?: AssetStore | null;
+}
+
 /** Request context handed to middleware, handlers and page components. */
 export interface Ctx<S = Record<string, unknown>> {
   req: Request;
   url: URL;
-  /** Route params. Empty until routing has run, so middleware sees `{}`. */
+  /**
+   * Route params, percent-decoded one path segment at a time. Empty until
+   * routing has run, so middleware sees `{}` before `next()`. Decoding never
+   * makes a separator: `%2F` and `%5C` stay as written, so a value has a `/`
+   * only between the segments of a wildcard, and is never `.` or `..`. A
+   * segment with a malformed escape is left as written.
+   */
   params: Record<string, string>;
+  /**
+   * The same keys as `params`, spelled as in `url.pathname`, undecoded. A
+   * wildcard is its segments joined with `/`. It tells `%2F` from `%252F`,
+   * which are both `%2F` in `params`.
+   */
+  rawParams: Record<string, string>;
   /** Whatever the app puts here. Shared across middleware, handler and page. */
   state: S;
   /** Document metadata for the shell. */
@@ -64,6 +129,22 @@ export interface Ctx<S = Record<string, unknown>> {
   data?: unknown;
   /** Set only when rendering the error page. */
   error?: RouteError;
+  /** Status and headers for a rendered page. See `ResponseOverride`. */
+  response: ResponseOverride;
+  /** True when the request is a partial-navigation fetch (`?fu-partial=1`). */
+  partial: boolean;
+  /** The runtime's bindings. `{}` when the handler was called without them. */
+  env: Env;
+  /**
+   * Keep the runtime alive until `promise` settles, for work the response does
+   * not wait for (a log write, a cache refresh). On celld an isolate may be
+   * stopped once the response is sent, so work not handed over here can be cut
+   * off. Under `serve.mjs` the process keeps running anyway, and a rejection is
+   * logged. A no-op when the handler was called without it.
+   */
+  waitUntil(promise: Promise<unknown>): void;
+  /** The static file store, or null when the runtime has none. */
+  assets: AssetStore | null;
   /** Run the rest of the chain. Returns the Response for outer middleware. */
   next(): Promise<Response>;
 }

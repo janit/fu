@@ -9,12 +9,12 @@ Deno.test("port and host parse with or without the equals sign", () => {
   assertEquals(parseArgs([]).cmd, "dev");
   assertEquals(parseArgs(["build", "app"]), {
     cmd: "build",
-    opts: { root: "app", port: undefined, hostname: undefined },
+    opts: { root: "app", port: undefined, hostname: undefined, outDir: undefined },
   });
 });
 
 Deno.test("mistakes are refused rather than half-understood", () => {
-  assertThrows(() => parseArgs(["serve"]), Error, "unknown command");
+  assertThrows(() => parseArgs(["start"]), Error, "unknown command");
   assertThrows(() => parseArgs(["dev", "--port", "x"]), Error, "port number");
   assertThrows(() => parseArgs(["dev", "--port"]), Error, "needs a value");
   assertThrows(() => parseArgs(["dev", "--prot=1"]), Error, "unknown flag");
@@ -33,7 +33,7 @@ Deno.test("a root without routes/ is refused", async () => {
 Deno.test("flags alone mean dev, and a bare word is not guessed to be a root", () => {
   assertEquals(parseArgs(["--port", "3000"]), {
     cmd: "dev",
-    opts: { root: Deno.cwd(), port: 3000, hostname: undefined },
+    opts: { root: Deno.cwd(), port: 3000, hostname: undefined, outDir: undefined },
   });
   assertThrows(() => parseArgs(["example"]), Error, "fu dev example");
 });
@@ -50,9 +50,21 @@ Deno.test("the port is decimal and leaves room for the HMR socket above it", () 
   assertEquals(parseArgs(["dev", "--port=65534"]).opts.port, 65534);
 });
 
-Deno.test("build refuses the dev server's flags rather than ignoring them", () => {
-  assertThrows(() => parseArgs(["build", "--port", "1"]), Error, "only applies to dev");
-  assertThrows(() => parseArgs(["build", "--host=x"]), Error, "only applies to dev");
+Deno.test("build refuses a server's flags, and dev an output dir, rather than ignoring them", () => {
+  assertThrows(() => parseArgs(["build", "--port", "1"]), Error, "applies to dev and serve");
+  assertThrows(() => parseArgs(["build", "--host=x"]), Error, "applies to dev and serve");
+  assertThrows(() => parseArgs(["dev", "--out", "x"]), Error, "applies to build and serve");
+});
+
+Deno.test("serve takes a port, a host and the output dir of the build it serves", () => {
+  assertEquals(parseArgs(["serve", "app", "--port", "8080", "--host=0.0.0.0", "--out", "o"]), {
+    cmd: "serve",
+    opts: { root: "app", port: 8080, hostname: "0.0.0.0", outDir: "o" },
+  });
+  assertEquals(parseArgs(["build", "--out=dist/x"]).opts.outDir, "dist/x");
+  // No HMR socket above it, so the top port is free to take.
+  assertEquals(parseArgs(["serve", "--port=65535"]).opts.port, 65535);
+  assertThrows(() => parseArgs(["serve", "--port=65536"]), Error, "port number");
 });
 
 Deno.test("help and version are commands, not errors", () => {

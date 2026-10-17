@@ -1,5 +1,15 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
-import { mergeSheets, optional, scanProject, ssrModule, strictImports, walk } from "./driver.ts";
+import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
+import {
+  bootModule,
+  mergeSheets,
+  optional,
+  scanProject,
+  ssrModule,
+  strictImports,
+  walk,
+  workerExports,
+  workerModule,
+} from "./driver.ts";
 
 const tmp = await Deno.makeTempDir();
 const assets = { js: [], css: [] };
@@ -55,20 +65,6 @@ Deno.test("ssrModule wires the optional app and shell only when present", () => 
   assertStringIncludes(full, "createHandler({ manifest, assets, app, Shell })");
 });
 
-Deno.test("ssrModule unwraps the Request from nitro's H3Event", () => {
-  // Nitro invokes the handler with an H3Event, which exposes url/headers but
-  // has no json()/text()/formData(). Without the unwrap every body read fails.
-  const out = ssrModule({
-    routeFiles: [],
-    root: "/p",
-    appPath: null,
-    shellPath: null,
-    errorPath: null,
-  }, assets);
-  assertStringIncludes(out, "input instanceof Request");
-  assertStringIncludes(out, "input?.req");
-});
-
 Deno.test("walk leaves out what is not a route: private directories, tests, declarations", async () => {
   const root = await Deno.makeTempDir();
   try {
@@ -113,39 +109,63 @@ Deno.test("the server's stylesheets come first, in dev and in a build alike", ()
   assertEquals(mergeSheets([new Map(), new Map()]), null);
 });
 
-Deno.test("the dev entry guards the Host header, the built one does not", () => {
+Deno.test("without a dev stylesheet file the entry is what it always was", () => {
   const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
-  const dev = ssrModule(project, assets, { hosts: ["localhost", "127.0.0.1"] });
+  const plain = ssrModule(project, assets);
+  assertEquals(plain.includes("existsSync"), false);
+  assertEquals(plain.includes("get assets"), false);
+  const dev = ssrModule(project, assets, { devCssFile: "/c/style.css" });
+  assertStringIncludes(dev, "existsSync");
+  assertStringIncludes(dev, "get assets()");
+});
+
+Deno.test("the dev entry links the stylesheet only while the file exists", async () => {
+  const root = await Deno.makeTempDir({ dir: tmp });
+  const cssFile = `${root}/style.css`;
+  await Deno.mkdir(`${root}/routes`);
+  await Deno.writeTextFile(`${root}/routes/index.ts`, `export default () => "home";\n`);
+  const project = {
+    routeFiles: ["/routes/index.ts"],
+    root,
+    appPath: null,
+    shellPath: null,
+    errorPath: null,
+  };
+  const withCss = { js: [{ href: "/boot.js" }], css: [{ href: "/style.css" }] };
+  const file = `${root}/ssr.ts`;
+  await Deno.writeTextFile(file, ssrModule(project, withCss, { devCssFile: cssFile }));
+  const entry = (await import(file)).default as (r: Request) => Promise<Response>;
+  const page = async () => await (await entry(new Request("http://localhost/"))).text();
+  const before = await page();
+  assertEquals(before.includes("stylesheet"), false);
+  assertStringIncludes(before, "/boot.js");
+  await Deno.writeTextFile(cssFile, ".a{}");
+  assertStringIncludes(await page(), '<link rel="stylesheet" href="/style.css">');
+  await Deno.remove(cssFile);
+  assertEquals((await page()).includes("stylesheet"), false);
+});
+
+Deno.test("the built entry serves its client files in front of the app, and nothing else imports", () => {
+  const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
+  const built = ssrModule(project, assets, {
+    clientFiles: { prefix: "/_fu/", files: ["/_fu/boot-a.js"] },
+  });
   assertStringIncludes(
-    dev,
-    'onlyHosts(createHandler({ manifest, assets }), ["localhost","127.0.0.1"])',
+    built,
+    'export default clientFiles(createHandler({ manifest, assets }), {"prefix":"/_fu/","files":["/_fu/boot-a.js"]});',
   );
-  assertEquals(ssrModule(project, assets).includes("onlyHosts"), false);
+  // Runtime-neutral: the Worker bundle gets no node: import from fu.
+  assertEquals(built.includes("node:"), false);
+  assertEquals(ssrModule(project, assets).includes("clientFiles"), false);
 });
-
-Deno.test("the built entry leaves everything under the asset prefix to nitro", () => {
-  // Nitro puts the hashed assets' year-long max-age on whatever the app
-  // answers under the prefix, after the app has answered. Only an error nitro
-  // renders itself escapes that, so the entry raises one instead of routing.
-  const project = { routeFiles: [], root: "/p", appPath: null, shellPath: null, errorPath: null };
-  const built = ssrModule(project, assets, { assetsPrefix: "/_fu/" });
-  // By path, not by name: the app does not depend on nitro, so under a strict
-  // node_modules layout (Deno's, pnpm's) "nitro/h3" resolves only from here.
-  const from = built.match(/import \{ HTTPError \} from "([^"]+)";/)?.[1] ?? "";
-  assertEquals([from.startsWith("/"), from.includes("nitro")], [true, true], from);
-  assertStringIncludes(built, 'path === "/_fu" || path.startsWith("/_fu/")');
-  assertStringIncludes(built, '"cache-control": "no-store"');
-  assertEquals(ssrModule(project, assets).includes("HTTPError"), false);
-});
-
 Deno.test("an unresolved import fails the build only when the app wrote it", () => {
   const errors: string[] = [];
   const onLog = (log: { code?: string; message: string; id?: string }) =>
     strictImports.onLog.call({ error: (m: string) => errors.push(m) as never }, "warn", log);
   onLog({ code: "UNRESOLVED_IMPORT", message: "Could not resolve 'x' in routes/a.tsx" });
   onLog({ code: "UNRESOLVED_IMPORT", message: "no", id: "/p/routes/b.tsx" });
-  // A dependency's own optional import (nitro's dev runtime has one) is its
-  // business: rolldown leaves it external, as it always did.
+  // A dependency's own optional import is its business: rolldown leaves it
+  // external, as it always did.
   onLog({
     code: "UNRESOLVED_IMPORT",
     message:
@@ -154,4 +174,130 @@ Deno.test("an unresolved import fails the build only when the app wrote it", () 
   onLog({ code: "UNRESOLVED_IMPORT", message: "no", id: "/p/node_modules/nitro/dist/x.mjs" });
   onLog({ code: "EMPTY_BUNDLE", message: "fine" });
   assertEquals(errors, ["Could not resolve 'x' in routes/a.tsx", "no"]);
+});
+
+Deno.test("the boot module loads the nav runtime only when the body opts in", () => {
+  const boot = bootModule({ root: "/p", islandFiles: ["/islands/A.tsx"] });
+  assertStringIncludes(boot, '"fuNav" in document.body.dataset');
+  assertStringIncludes(boot, "installNav(manifest)");
+  // Hydration is started, not awaited: the runtime loads beside the island
+  // chunks, and a page without the attribute pays for the test alone.
+  assertStringIncludes(boot, "hydrateIslands(manifest).then(markHydrated);\n");
+  assertEquals(boot.includes(".then(() =>"), false);
+  assertEquals(/import\(.*nav\.[tj]s"\)/.test(boot), true);
+  // The nav runtime is reached by dynamic import only, so it is its own chunk.
+  assertEquals(/^import .*nav\.[tj]s/m.test(boot), false);
+});
+
+Deno.test("worker.ts: prepare is called, every other runtime export is carried, types are not", () => {
+  const src = `
+    export async function prepare(env) {}
+    export const scheduled = { async scheduled() {} };
+    export class Room {}
+    const q = { queue() {} };
+    export { q as queue };
+    export type T = string;
+    export interface I {}
+    export { type I as J };
+    export declare const ambient: number;
+    export const enum Flags { A }
+  `;
+  assertEquals(workerExports("worker.ts", src), {
+    prepare: true,
+    names: ["scheduled", "Room", "queue"],
+  });
+  assertEquals(workerExports("worker.ts", "export class Room {}"), {
+    prepare: false,
+    names: ["Room"],
+  });
+  assertEquals(workerExports("worker.ts", "export const prepare = (env) => {};").prepare, true);
+});
+
+Deno.test("worker.ts: what celld or the Worker cannot take is refused at build time", () => {
+  for (
+    const [src, why] of [
+      ["export default {};", "default export"],
+      ["const x = 1; export { x as default };", "default export"],
+      ['export * from "./x.ts";', "export *"],
+      ["export const { a, b } = {};", "destructured"],
+      ["export const prepare = 42;", "must be a function"],
+      ["export class prepare {}", "must be a function"],
+      ['const x = 1; export { x as "a-b" };', "not a JavaScript name"],
+    ]
+  ) {
+    assertThrows(() => workerExports("worker.ts", src), Error, why, src);
+  }
+});
+
+/** Write a generated Worker and a stand-in server module, and import the Worker. */
+async function loadWorker(
+  prepareSrc: string | null,
+): Promise<{ fetch(r: Request, env?: unknown, ctx?: unknown): Promise<Response> }> {
+  const dir = await Deno.makeTempDir({ dir: tmp });
+  await Deno.writeTextFile(
+    `${dir}/ssr.ts`,
+    `globalThis.__fuSsrRuns = (globalThis.__fuSsrRuns ?? 0) + 1;\n` +
+      `export default (req, extra) => Promise.resolve(new Response(JSON.stringify({\n` +
+      `  path: new URL(req.url).pathname, env: extra.env, assets: extra.assets,\n` +
+      `  prepared: globalThis.__fuPrepared ?? null, waits: typeof extra.waitUntil,\n` +
+      `})));\n`,
+  );
+  let workerPath: string | null = null;
+  if (prepareSrc !== null) {
+    workerPath = `${dir}/worker.ts`;
+    await Deno.writeTextFile(workerPath, prepareSrc);
+  }
+  const exports = prepareSrc === null
+    ? { prepare: false, names: [] }
+    : workerExports(workerPath!, prepareSrc);
+  await Deno.writeTextFile(`${dir}/entry.ts`, workerModule(workerPath, exports));
+  return (await import(`${dir}/entry.ts`)).default;
+}
+
+const g = globalThis as { __fuSsrRuns?: number; __fuPrepared?: unknown; __fuPrepareCalls?: number };
+
+Deno.test("the Worker loads the app on the first request, after prepare, once", async () => {
+  g.__fuSsrRuns = 0;
+  g.__fuPrepared = undefined;
+  g.__fuPrepareCalls = 0;
+  const worker = await loadWorker(
+    `export function prepare(env) {\n` +
+      `  globalThis.__fuPrepareCalls++;\n` +
+      `  return new Promise((r) => setTimeout(r, 5)).then(() => globalThis.__fuPrepared = env.KEY);\n` +
+      `}\n`,
+  );
+  // Imported, and nothing of the app has run.
+  assertEquals(g.__fuSsrRuns, 0);
+  const waited: unknown[] = [];
+  const ctx = { waitUntil: (p: unknown) => waited.push(p) };
+  const env = { KEY: "k", ASSETS: { fetch: () => {} } };
+  const [a, b] = await Promise.all([
+    worker.fetch(new Request("http://x/a"), env, ctx),
+    worker.fetch(new Request("http://x/b"), env, ctx),
+  ]);
+  const body = await a.json();
+  assertEquals([body.path, body.env.KEY, body.prepared, body.waits], ["/a", "k", "k", "function"]);
+  assertEquals((await b.json()).path, "/b");
+  assertEquals(body.assets !== null, true);
+  // Two concurrent first requests: one prepare, one evaluation of the app.
+  assertEquals([g.__fuPrepareCalls, g.__fuSsrRuns], [1, 1]);
+});
+
+Deno.test("a prepare that fails is tried again on the next request", async () => {
+  g.__fuPrepareCalls = 0;
+  const worker = await loadWorker(
+    `export function prepare() {\n` +
+      `  if (++globalThis.__fuPrepareCalls === 1) throw new Error("first fails");\n` +
+      `}\n`,
+  );
+  await assertRejects(() => worker.fetch(new Request("http://x/"), {}), Error, "first fails");
+  const res = await worker.fetch(new Request("http://x/"), {});
+  assertEquals(res.status, 200);
+  assertEquals(g.__fuPrepareCalls, 2);
+});
+
+Deno.test("without worker.ts, or a runtime's ctx and ASSETS, the Worker still answers", async () => {
+  const worker = await loadWorker(null);
+  const body = await (await worker.fetch(new Request("http://x/p"))).json();
+  assertEquals([body.path, body.env, body.assets, body.waits], ["/p", {}, null, "undefined"]);
 });

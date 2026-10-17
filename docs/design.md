@@ -1,11 +1,12 @@
 # Fresh Urquell — design
 
-**Date:** 2026-09-09 (design), kept up to date since; last revised 2026-10-03
+**Date:** 2026-09-09 (design), kept up to date since; last revised 2026-10-15
 **Status:** implemented and verified; a living document
 **Package:** `@janit/fu` (repo `janit/fu`)
 
 A minimal islands framework: file-system routing, SSR and hydration on
-Preact 11, built by rolldown and served by Nitro. Runs on Deno, Node and Bun.
+Preact 11, built by rolldown into one Worker module. celld runs it; Deno, Node
+and Bun run the same module through a runner on srvx.
 
 ## Why this exists
 
@@ -28,10 +29,48 @@ Middleware, `ctx.state`, page metadata and a root shell were added after
 measuring routemap4 (see "Middleware" below).
 
 Error pages were added for the same reason as `_app`: without them a thrown
-error reaches the client as Nitro's raw JSON.
+error reached the client as the server's raw JSON.
 
-Out: partials, streaming SSR, nested layouts, per-directory middleware,
-prerendering. These are deliberate omissions, not
+Added in 0.5.0, each because one app (routemap4's frontend) needed it and each
+free for an app that does not use it: a shell that owns the whole document
+(`FuHead`, `FuScripts`), status and headers for a rendered page
+(`ctx.response`), static files served from inside the middleware chain
+(`@janit/fu/static`), the request handler built from source for in-process
+tests (`@janit/fu/testing`), and client navigation that swaps named regions of
+a page (`Partial`, `data-fu-nav`; a separate chunk that only a page carrying
+the attribute requests). The README describes their behaviour.
+
+Added in 0.5.1, found by porting that app onto 0.5.0: an `async` page, error
+page or shell is called and awaited by fu before anything renders, page first
+(the renderer drops a component that returns a promise, so they used to render
+nothing; awaiting the page first is also what lets a shell read what the page
+computed), and a promise nobody can await fails the render by name; a
+document-owning shell is spared fu's default error title and robots tag; every
+error under `/_fu/` is `no-store`; a page preloads only the chunks it will run;
+`fu dev` exits on SIGTERM and SIGINT; `staticFiles` takes an `etag` callback.
+
+Why the async components are called outside the renderer rather than
+suspended inside it: preact-render-to-string does re-render a component that
+throws a promise, but it wraps the result in `<!--$s-->` comments, and the
+shell has by then already rendered once, without the page's state. Called
+first and awaited, the page costs nothing in markup and the order is the one
+Fresh had. The price is that such a component has no hooks; what it returns
+is rendered normally and has them.
+
+Changed in 0.6.0: celld is the primary runtime, and Nitro is gone. The build
+writes one Worker module (`export default { fetch }`) and a runner that serves
+that same module on Node, Deno or Bun; `ctx` gained `env`, `waitUntil` and
+`assets`; an optional `worker.ts` carries `prepare(env)` and whatever else the
+Worker must export (Durable Object classes, `scheduled`). The request that
+started it was a bolt-on, a `--target workers` beside the Nitro build. The
+owner asked for the opposite: architect fu so the Worker is the artifact, and
+keep the other runtimes where it costs nothing. It cost little: the core was
+already `(Request) => Response`, and Nitro's remaining jobs (a static handler,
+a dev server, presets) were each either a few lines over srvx or a source of
+traps (listed at the end of "Traps encoded in the implementation").
+
+Out: streaming SSR, nested layouts, per-directory middleware,
+prerendering, wrappers for Durable Objects, KV, queues and cron. These are deliberate omissions, not
 oversights; add them only when an app needs them.
 
 ## Architecture
@@ -45,12 +84,12 @@ Two layers, with a hard boundary between them.
   │ driver (bundler-specific)                             │
   │   scan fs → manifest                                  │
   │   rolldown: jsx (oxc), css (lightningcss), islands    │
-  │   nitro:   server build, presets, dev server          │
+  │   rolldown: Worker (one file) + runner; dev watch      │
   └─────────────────┬─────────────────────────────────────┘
                     │  two plain data structures
   ┌─────────────────┴─────────────────────────────────────┐
   │ core (bundler-agnostic)                               │
-  │   router  — URLPattern                                │
+  │   router  — segments                                  │
   │   render  — SSR + island boundary detection           │
   │   client  — hydration + HMR re-render                 │
   └───────────────────────────────────────────────────────┘
@@ -63,10 +102,19 @@ type RouteManifest = Record<string, () => Promise<RouteModule>>;
 type Assets = {
   js: { href: string }[];
   css: { href: string }[];
-  preload?: { href: string }[];
-  islands?: Record<string, string>; // island file -> its chunk's URL
+  preload?: { href: string }[];     // what every page preloads
+  islands?: Record<string, string | string[]>; // island file -> its chunk's URL,
+                                    // or [its chunk, ...the chunks that one imports statically]
 };
 ```
+
+The build fills both from rolldown's output metadata: `preload` is the static
+import closure of the entry chunk, and each island's list is its chunk plus
+that chunk's static import closure (`imports`, never `dynamicImports`), minus
+what `preload` already covers. A page therefore preloads what it will run and
+nothing else. Announcing every shared chunk on every page, as 0.5.0 did, cost
+the first real app 34 preloads per page, most of them for code the page never
+executed.
 
 This boundary is not aspirational. It was verified twice: the core ran
 standalone under Deno with a hand-written manifest and no bundler at all, and
@@ -78,16 +126,36 @@ reversible. Ship the rolldown driver; keep a Vite driver possible.
 
 ## Runtime contracts
 
-**Server.** Nitro's handler contract is a web-standard fetch function:
-`(req: Request) => Response`. Nothing else is required. Nitro's presets handle
-deployment targets, and `srvx` absorbs the runtime differences — one
-`node-server` build runs unmodified on Node, Bun and Deno.
+**Server.** The core's contract is a web-standard fetch function with one
+optional argument: `(req: Request, extra?: { env, waitUntil, assets }) =>
+Promise<Response>`. It never learns who called it. The build wraps it twice:
 
-**Routing.** `URLPattern`, a web standard. Native on Deno and Bun; Node ships it
-in 24+. On Node 22 it is absent entirely (not under `node:url`, not behind a
-flag), so the router loads `urlpattern-polyfill` only when the global is
-missing. Deno and Bun never execute it, though the server bundle still carries
-its ~24 kB.
+- **The Worker** (`.output/server/index.mjs`), what celld runs. On each
+  request: `prepare(env)` from `worker.ts`, once per isolate (a memoised
+  promise; a rejection is not memoised, so the next request retries); then a
+  memoised dynamic import of the app; then
+  `handler(request, { env, waitUntil: ctx.waitUntil, assets: env.ASSETS })`.
+  The dynamic import is inlined into the one file and stays lazy (trap 6), so
+  nothing of the app runs at isolate start and module-scope code sees what
+  `prepare` set up.
+- **The runner** (`.output/server/serve.mjs`), for Node, Deno and Bun. It
+  imports the Worker (a separate file, so what runs is what celld would run)
+  and calls it as a Workers runtime would: `worker.fetch(request, env, ctx)`,
+  with the process environment as `env`, `assetsFromDir(.output/public)` as
+  `env.ASSETS`, and a `ctx.waitUntil` that logs a rejection and that a
+shutdown waits for, within the signal's grace period, as a Workers runtime
+lets the work finish. One code path
+  runs everywhere: the Worker's.
+
+The Worker is built with `platform: "neutral"` and the conditions celld's own
+bundler uses (`workerd`, `worker`, `import`, `default`): not `browser`, since
+the same module runs on Node, and not `node`, which would pull in code celld
+does not have. `node:` imports stay external.
+
+**Routing.** A segment matcher of fu's own, since 0.5.3. Until then it was
+`URLPattern`, with `urlpattern-polyfill` for Node 22; it went because it could
+not be made to treat `%2F` as part of a segment (below). A route's pattern is
+still spelled the URLPattern way, as a name and a sort key.
 
 File-path mapping:
 
@@ -102,26 +170,58 @@ Routes sort static → dynamic → wildcard, then by depth, then segment by segm
 (a literal beats a param), then by pattern — so the file system's listing order
 never decides which of two overlapping routes wins.
 
-Params are decoded after URLPattern matches the encoded path, so `%2F` passes
-as part of one segment and only then becomes a slash. Left alone, `[slug]`
-would hand a handler `../../etc/passwd` from `/blog/..%2F..%2Fetc%2Fpasswd` —
-a traversal for the first app that joins a param onto a directory. A decoded
-value holding NUL, a backslash or a `.`/`..` segment is therefore no match, and
-only a wildcard may hold `/`; the router moves on to the next route, so
-`[...rest]` beside `[slug]` still takes `a%2Fb`. A malformed escape is no match
-too, rather than a 500.
+The pathname is matched as written, split on a literal `/`. `%2F` is part of
+its segment: `/s/abc%2Fdef` answers `s/[code]`, and `/dublin%2Fcork` is one
+segment. A static segment matches a segment that decodes to it.
 
-`URLPattern.exec` is not cheap: ~3.5 µs per route on Deno, so a 16-route app
-spent 30–60 µs routing every request, more than the Preact render of a small
-page. Two facts fix that without leaving the standard. The `{ pathname }`
-dictionary input is five times slower than a URL string on Deno, so the router
-passes `"http://x" + pathname`. And `exec` only needs to run where it can
-match: a route with no pattern syntax at all is matched by string equality
-against `urlPattern.pathname` (the canonical, percent-encoded form, so
-`routes/über.tsx` still matches `/%C3%BCber`), and a pattern whose segment
-count cannot fit the path is skipped. Measured with 16 routes: a static hit
-went from 28 µs to 65 ns, a dynamic hit from 57 µs to 1.6 µs, a miss from
-58 µs to 1.1 µs. URLPattern still decides every non-literal match.
+**A param is safe by default, and that is deliberate.** Left alone, decoding
+would hand a handler `../../etc/passwd` from `/blog/..%2F..%2Fetc%2Fpasswd`:
+a traversal for the first app that joins a param onto a directory. Three rules
+keep that from happening, whatever the app does with the value:
+
+- *Decoding never makes a separator.* `ctx.params` is each segment decoded
+  with `decodeURIComponent` on its own, except that an encoded slash or
+  backslash (`%2F`, `%5C`, either case) stays as the URL wrote it. A param
+  holds a `/` only between the segments of a wildcard, one per real separator,
+  so `[slug]` gets `..%2F..%2Fetc%2Fpasswd`: one segment of text.
+- *No param is a dot segment.* A segment that is `.` or `..` once decoded
+  (`..`, `%2e%2e`, `.%2E`) is resolved the way URL parsing resolves it; a path
+  that had one reaches no static or param route, and a wildcard route sees
+  what is left. A request cannot get this far with one anyway: the URL of a
+  `Request` is already resolved.
+- *NUL is no match.* A segment that decodes to something holding `\0` is never
+  a param; the router moves on to the next route.
+
+Up to 0.5.2 the first rule was a refusal instead: a decoded value holding `/`
+outside a wildcard was no match. That made `%2F` act as a separator in
+practice (the request fell to the catch-all, which got `dublin/cork` for
+`/dublin%2Fcork`) and left no route able to answer such a URL. Keeping the
+escape gives the same safety and lets the route match. The cost is one
+ambiguity: `%2F` in a param is what `%2F` and `%252F` both give.
+
+`ctx.rawParams` is the same keys with the URL's own text, for an app that
+needs to tell those apart or to decode by another rule (`decodeURI`). A
+malformed escape matches, and its segment is handed over as written. A
+backslash written out separates like `/`, as in a URL (a request's pathname
+never holds one).
+
+A match costs time in proportion to the length of the path, whatever the
+path: this runs for every request before any middleware could refuse it. The
+path is split and decoded once for all routes; a segment no part can take
+(empty, or holding NUL) refuses every param route in that same pass; and a
+route is placed without trying anything twice. The parts before the first
+wildcard sit at the start, those after the last at the end, and each run of
+parts between two wildcards goes as far right as it fits, last run first,
+which is the assignment a greedy pattern match arrives at by backtracking.
+One route therefore costs the number of segments, times the longest run of
+parts between two of its wildcards when it has several: a property of the
+route file, not of the request. (The first cut of this matcher retried every
+length of a wildcard: 8000 segments and a trailing slash took 2.4 s.)
+
+Cost, with 16 routes on Deno: a static hit ~55 ns (string equality against
+the decoded path, before the path is even split), a dynamic hit ~500 ns, a
+miss ~1500 ns. `URLPattern.exec` took ~3.5 microseconds per route, and even
+run only where it could match, a dynamic hit was ~1900 ns.
 
 The renderer caches each route's loaded module on the route; a dynamic import
 of an already-loaded module is cheap but not free, and the manifest cannot
@@ -223,8 +323,9 @@ correctly emits no update, and CSS HMR silently never fires.
 
 ## HMR
 
-rolldown `DevEngine` produces patches; `crossws` carries them; Nitro serves the
-app. Editing an island hot-swaps its markup **and preserves hook state**;
+rolldown `DevEngine` produces patches; `crossws` carries them; a rolldown
+`watch` rebuilds the Worker, which the dev server re-imports after every build
+and serves through srvx, client files first. Editing an island hot-swaps its markup **and preserves hook state**;
 editing CSS swaps the stylesheet in place; editing a route rebuilds the server.
 
 The HMR socket streams module source on every save, and a browser lets any
@@ -234,7 +335,7 @@ bound `--host`, gets a socket; everything else, including DNS rebinding (which
 keeps the port but not the name) and a missing `Origin`, gets a 403. It binds
 the same host as the dev server, which is `127.0.0.1` unless `--host` says
 otherwise: the dev server hands out source and stack traces, so being
-reachable from the network is opt-in. On the app port the generated dev entry
+reachable from the network is opt-in. On the app port the dev server
 checks the `Host` header for the same reason, answering only to loopback
 names, `*.localhost` and the bound `--host` (and to anything when bound to
 `0.0.0.0`, where the names cannot be known).
@@ -252,14 +353,21 @@ but the swap is wrong and needs a manual refresh. Mitigation when it matters:
 hash the island's hook-call count in the transform and force a remount when it
 changes.
 
-**Telling dev from production.** Nitro's rolldown builder replaces neither
-`import.meta.dev` nor `process.env.NODE_ENV` (only its Vite builder defines the
-latter), so an app's code cannot see which server it is in. `fu dev` sets
-`FU_DEV=1` in its own environment before Nitro starts the app; a built server
-never sets it. The case that forced it: fu-todo's CSP is `connect-src 'self'`,
-and the HMR socket on `port + 1` is a different origin, so dev — and only dev —
-has to name it. It is an environment variable rather than an export because the
-app reads it at module load, on any runtime, with no framework import.
+**Telling dev from production.** Nothing in the bundle says which server it
+is in. `fu dev` sets `FU_DEV=1` in its own environment before the app loads; a
+built server never sets it. It reaches the app as `ctx.env.FU_DEV` (dev hands
+the Worker the process environment, as the runner does) and as
+`process.env.FU_DEV` on a runtime that has one. The case that forced it:
+fu-todo's CSP is `connect-src 'self'`, and the HMR socket on `port + 1` is a
+different origin, so dev, and only dev, has to name it.
+
+**Dev is not the runtime.** The dev server runs the Worker in its own process,
+so it is built with `platform: "node"` and the dev runtime's resolution, not a
+Worker's. Each rebuild is imported anew under a query string, and no runtime
+frees a module it has loaded, so dev memory grows with every save; that is
+accepted and documented. Each is a fresh Worker, so `prepare` runs again too.
+Two quick saves can finish loading out of order; the older never replaces the
+newer. `celld dev` over `.output` is the runtime-true check.
 
 ### Traps encoded in the implementation
 
@@ -278,48 +386,60 @@ Each of these cost real debugging and none is documented upstream:
    runtime file.
 5. Never call `notifyPayloadDelivered` for a patch that was not actually served.
    It corrupts per-client shipped-state and updates stop firing silently.
-6. Nitro claims `routes/` as its own server-route directory. Point `serverDir`
-   at the generated dir and set `scanDirs: []`, or app routes shadow the
-   catch-all and return serialized vnodes as JSON.
-7. `handlers[].handler` is path-resolved, so a virtual id does not survive
-   Nitro's routing codegen. Generate a real file under `.fu/`.
-8. Dev bootstrap order is `listen()` → `prepare()` → `build()`. `build()` starts
-   the dev runner; wrong order gives `Runner did not become ready in time`.
+6. **Lazy init survives inlining.** The Worker is one file
+   (`codeSplitting: false`, the replacement for the deprecated
+   `inlineDynamicImports`), and the app graph is a dynamic import of the
+   entry. Rolldown 1.2 wraps every module of that graph in a lazy
+   `__esmMin` initialiser, top-level await and third-party packages included,
+   minified or not: verified by a spike on 2026-10-15 and pinned by a test (a
+   route's module-scope code runs after `prepare`, on the first request).
+   Rollup hoists instead; if a rolldown upgrade does, the fallback is two
+   chunks in `server/` and a real dynamic import.
+7. **`node:` imports have no side effects.** An external is kept for its
+   side effects unless told otherwise, so an app importing `assets()` from
+   `@janit/fu/static`, a module that also holds `staticFiles` and imports
+   `node:fs`, got an `import "node:fs"` in its Worker. `serverInput` declares
+   external `node:` modules side-effect free, so an unused one is dropped.
+   Splitting the module or a conditional export would not do: under the
+   runner Node runs the Worker build, so one artifact must hold both.
+8. **A Workers fetch returns immutable headers.** `env.ASSETS.fetch()` on
+   celld returns a Response whose headers cannot be set, and an outer
+   middleware (security headers) sets headers on whatever comes back.
+   `assets()` and `clientFiles` always answer with a copy.
 9. crossws: returning a plain `{crossws}` object fails on Deno. Use inline
    `websocket` hooks, which behave uniformly across runtimes.
 10. **Node package self-reference.** An app in this repo imports the framework
     by name, and Node resolves that by walking up to the root `package.json`
     and honouring its `exports` — the compiled `dist/`. Every app bundle then
-    carried two copies of the core, one stale, and nitro's dev worker died on
+    carried two copies of the core, one stale, and the dev server died on
     the externalised `dist/mod.js` (`Loading unprepared module`). The dev
     server had been broken from the moment the npm package landed, and nothing
     in the check task noticed. The drivers now alias the framework's own
     package name (read from the `package.json` above the runtime modules) to
     the copy they are running from; both apps build with `dist/` deleted. For
     a real consumer the alias resolves to the installed package, i.e. a no-op.
-11. Nitro hard-codes `node_modules/.nitro` under `rootDir` for its well-known
-    files regardless of `buildDir`, so every app directory grows a
-    `node_modules/`. Harmless under the Deno workspace; do not fight it.
-12. Nitro picks its preset from the runtime running the build. Built under
-    Deno, the output calls `Deno.serve` and crashes on Node and Bun, so the
-    build driver sets `node-server` unless `NITRO_PRESET` says otherwise.
-13. Nitro sends a public dir's `maxAge` only when the dir is mounted below
-    `/`: one at the root falls through to the app and gets no cache header.
-    Hence the build serves its hashed client files from `/_fu/`. That header
-    is a route rule applied after the app answers, so the bare `/_fu/`, which
-    falls through to the app's 404, would be cached for a year, and so would
-    the app's answer to any non-GET request there. Rules match on path alone
-    and are set last (h3's `headers` rule writes them in a `finally`), so
-    nothing the app puts on its response survives. The one response the rule
-    does not reach is an error nitro renders itself, so the generated entry
-    throws an h3 `HTTPError` 404 with `no-store` for every path under the
-    prefix instead of routing it. A missing file on GET never gets that far:
-    nitro's static handler answers it, as a JSON 404 with no cache header.
-14. Nitro writes into the output dir without clearing it, so earlier builds'
-    hashed assets and another preset's `deno.json` ship along. The build
-    removes the default `.output` first, and a custom `outDir` when it holds
-    `nitro.json`; nitro writes that file last, so in a custom dir without one
-    (a build that died half-way) only `public/_fu` and `server` are cleared.
+11. **Deno's server cannot be closed by force.** srvx's Deno adapter closes
+    through `Deno.HttpServer.shutdown()`, which waits for every request in
+    flight; there is no other way. A dev server stopped while answering a slow
+    request held the exit for the whole two-second grace. Dev waits a quarter
+    of a second for its server and goes on; the process exit takes the rest.
+    The runner keeps the graceful close: in production a request in flight is
+    worth two seconds.
+12. **The asset prefix is not a path rule.** Up to 0.5.x a rule on the path
+    (`/_fu/**` immutable, matched by nitro on a normalised spelling) met a
+    guard in the entry that read the raw spelling, and `//_fu/x`, `/_fu%2Fx`
+    and the like came back as the app's 404 marked immutable for a year: a
+    cache poisoning any visitor could trigger. `clientFiles` reads the path
+    once and interprets nothing: a GET or HEAD whose pathname is to the letter
+    one of the files the build wrote is served from the asset store with the
+    long header; anything else under the prefix is a `no-store` 404 the app
+    never sees; anything not under it is the app's, whatever it looks like.
+    The build tests send each spelling raw over a socket to the runner.
+
+The traps of 0.5.x that were nitro's (its claim on `routes/`, a virtual
+handler id not surviving its codegen, the dev bootstrap order, `node_modules/.nitro`
+under every app, a preset picked from the building runtime, an output dir it
+never cleared) went with it.
 
 ## Distribution
 
@@ -379,7 +499,14 @@ left behind by an earlier run would answer the probes and let a broken
 artefact pass, and that had happened: the servers used to be started in
 subshells, so the cleanup killed the subshell and orphaned the server. They
 now run under `setsid` and the cleanup kills the process group, with SIGKILL
-as the fallback since the dev server ignores SIGTERM.
+as the fallback. (Until 0.5.1 the dev server ignored SIGTERM, and SIGINT: the
+HMR socket is an srvx server, whose graceful-shutdown plugin registers a
+handler for both signals that closes that one server. A registered handler
+cancels the runtime's default of dying on the signal, and nothing closed the
+dev server, its watcher, or rolldown's dev engine, so the process stayed up
+with the page port still listening. `dev()` now turns that plugin off and
+registers its own handler, `exitOnSignal`, which closes all of them and exits
+0, after two seconds at the latest. The runner does the same.)
 
 ## Package layout
 
@@ -391,16 +518,25 @@ src/
   types.ts         shared types
   app.ts           middleware chain (App, compose)
   errors.ts        HttpError, status text, error normalisation
-  router.ts        URLPattern routing with the literal/segment fast path
+  router.ts        routing on raw path segments, with the literal fast path
   render.ts        SSR, island boundaries, error pages, document assembly
   client.ts        hydration + HMR re-render
+  nav-protocol.ts  names the server and the navigation runtime share
+  nav.ts           client navigation (its own chunk, loaded on demand)
   hmr-runtime.js   client HMR runtime (rolldown `implement` source)
+  assets.ts        assets() middleware and the /_fu/ policy (runtime-neutral;
+                   bundled into the Worker)
+  static.ts        assetsFromDir store and staticFiles middleware (`node:` imports)
+  serve.ts         serveWorker: the runner's adapter over srvx
+  lifecycle.ts     listening, exitOnSignal (shared by dev and the runner)
+  testing.ts       appHandler: the handler from source files, for tests
+  project.ts       project scan (routes, islands, app, shell, error page)
   plugins.ts       rolldown plugins only: jsx, css, selfAlias, virtual
-  driver.ts        glue both drivers share: runtime paths, project scan,
-                   rolldown/nitro option sets, generated entries
+  driver.ts        glue both drivers share: runtime paths, rolldown option
+                   sets, generated modules (server, Worker, runner), worker.ts
   build.ts         production driver
   dev.ts           dev driver
-  cli.ts           `fu dev` / `fu build`
+  cli.ts           `fu dev` / `fu build` / `fu serve`
 example/           runnable app exercising every feature (workspace member)
 fu-todo/           complete app with SQLite and a JSON API (workspace member;
                    private repo only, published separately as janit/fu-todo)
@@ -418,13 +554,13 @@ inference and stays.
 
 ## Versions
 
-Preact 11 (`^11.0.0`), `@preact/signals` 2.11, Nitro 3 beta,
-rolldown 1.2, lightningcss 1.33. rolldown's `devMode` is marked "not ready for
+Preact 11 (`^11.0.0`), `@preact/signals` 2.11, rolldown 1.2,
+lightningcss 1.33, srvx 1.0, crossws 0.4. The Worker targets celld 0.6. rolldown's `devMode` is marked "not ready for
 public usage"; instability here is accepted deliberately.
 
 ## Verified
 
-Production build on Deno and Node; one `node-server` artifact serving on Node,
+Production build on Deno and Node; one Worker and its runner serving on Node,
 Bun and Deno; dev server with island HMR, CSS HMR and route rebuild; hydration
 in dev and prod; CSS Modules with `composes`; wildcard routing; the npm
 artefact building, serving and dev-serving an app through its own bin.

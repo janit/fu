@@ -1,8 +1,8 @@
 {
   "name": "@janit/fu",
-  "version": "0.4.3",
+  "version": "0.6.0",
   "type": "module",
-  "description": "A minimal islands framework on Preact 11, rolldown and Nitro. Runs on Deno, Node and Bun.",
+  "description": "A minimal islands framework on Preact 11 and rolldown. Builds a Worker for celld; runs on Deno, Node and Bun.",
   "license": "MIT",
   "exports": {
     ".": {
@@ -21,6 +21,10 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
+    "./nav": {
+      "types": "./dist/nav.d.ts",
+      "default": "./dist/nav.js"
+    },
     "./render": {
       "types": "./dist/render.d.ts",
       "default": "./dist/render.js"
@@ -37,6 +41,18 @@
       "types": "./dist/errors.d.ts",
       "default": "./dist/errors.js"
     },
+    "./static": {
+      "types": "./dist/static.d.ts",
+      "default": "./dist/static.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./serve": {
+      "types": "./dist/serve.d.ts",
+      "default": "./dist/serve.js"
+    },
     "./cli": {
       "types": "./dist/cli.d.ts",
       "default": "./dist/cli.js"
@@ -49,11 +65,9 @@
   "dependencies": {
     "crossws": "^0.4.12",
     "lightningcss": "^1.33.0",
-    "nitro": "^3.0.260903-beta",
     "preact-render-to-string": "^6.8.0",
     "rolldown": "^1.2.12",
-    "srvx": "^1.0.5",
-    "urlpattern-polyfill": "^10.1.0"
+    "srvx": "^1.0.5"
   },
   "peerDependencies": {
     "@preact/signals": "^2",
@@ -92,9 +106,10 @@
     "preact",
     "ssr",
     "rolldown",
-    "nitro",
     "deno",
-    "framework"
+    "framework",
+    "workers",
+    "celld"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && cp src/hmr-runtime.js dist/hmr-runtime.js && sed -i -E 's|(from \"\\./[^\"]+)\\.ts\"|\\1.js\"|g' dist/*.d.ts && ! grep -rhoE \"[\\\"']\\.\\.?/[^\\\"']+\\.ts[\\\"']\" dist/*.d.ts",

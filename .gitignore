@@ -9,3 +9,5 @@ fu-todo/data/
 /data/
 deno.lock
 .serena/
+.celld/
+.celld-probe/

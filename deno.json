@@ -16,13 +16,15 @@
     "preact": "npm:preact@^11.0.0",
     "preact-render-to-string": "npm:preact-render-to-string@^6.8.0",
     "@preact/signals": "npm:@preact/signals@^2.11.3",
-    "urlpattern-polyfill": "npm:urlpattern-polyfill@^10.1.0",
     "rolldown": "npm:rolldown@^1.2.12",
     "rolldown/experimental": "npm:rolldown@^1.2.12/experimental",
     "lightningcss": "npm:lightningcss@^1.33.0",
-    "nitro/builder": "npm:nitro@^3.0.260903-beta/builder",
     "crossws/server": "npm:crossws@^0.4.12/server",
-    "@std/assert": "jsr:@std/assert@^1.0.19"
+    "@std/assert": "jsr:@std/assert@^1.0.19",
+    "srvx/node": "npm:srvx@^1.0.5/node",
+    "srvx/deno": "npm:srvx@^1.0.5/deno",
+    "srvx/bun": "npm:srvx@^1.0.5/bun",
+    "srvx": "npm:srvx@^1.0.5"
   },
   "exclude": [
     "**/.fu/",

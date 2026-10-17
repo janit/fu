@@ -1,12 +1,12 @@
 // Glue shared by the dev and build drivers: where the framework's own runtime
-// modules live, what a project contains, and the option sets both drivers
-// hand to rolldown and nitro.
-import type { createNitro } from "nitro/builder";
+// modules live, what a project contains, the modules generated for it, and
+// the option sets both drivers hand to rolldown.
 import type { InputOptions } from "rolldown";
+import { parseSync } from "rolldown/experimental";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { css, hash, jsx, selfAlias, virtual } from "./plugins.ts";
+import type { Project } from "./project.ts";
 import type { Assets } from "./types.ts";
 
 /**
@@ -70,8 +70,7 @@ export const strictImports = {
   ) {
     if (log.code !== "UNRESOLVED_IMPORT") return;
     // Only the app's own imports. A dependency's unresolved optional import
-    // (nitro's dev runtime has one) stays what it was: external, and its
-    // business.
+    // stays what it was: external, and its business.
     const importer = log.id ?? / in (\S+)\s*$/m.exec(log.message)?.[1] ?? "";
     if (/(^|[\\/])node_modules[\\/]/.test(importer)) return;
     this.error(log.message);
@@ -80,87 +79,18 @@ export const strictImports = {
 
 /** Absolute paths of the runtime modules the generated code imports. */
 export const runtime = {
+  assets: path.join(HERE, `assets${EXT}`),
   client: path.join(HERE, `client${EXT}`),
+  nav: path.join(HERE, `nav${EXT}`),
   render: path.join(HERE, `render${EXT}`),
+  serve: path.join(HERE, `serve${EXT}`),
   hmr: path.join(HERE, "hmr-runtime.js"),
 };
 
-/** Everything a driver needs to know about a project, found once up front. */
-export interface Project {
-  root: string;
-  /** Root-relative, e.g. "/routes/blog/[slug].tsx". */
-  routeFiles: string[];
-  islandFiles: string[];
-  /** Absolute path to `app.ts` (or .tsx, .js, .jsx), if the project has one. */
-  appPath: string | null;
-  /** Absolute path to `routes/_app.tsx`, if the project has one. */
-  shellPath: string | null;
-  /** Absolute path to `routes/_error.tsx`, if the project has one. */
-  errorPath: string | null;
-  /** Client bundle output, served as public assets. */
-  clientDir: string;
-  /** Generated server entry. */
-  genDir: string;
-}
-
-export function scanProject(root: string): Project {
-  root = path.resolve(root);
-  // Without this a mistyped root builds an app with no routes, which serves a
-  // 404 for everything and says nothing about why.
-  if (!fs.existsSync(path.join(root, "routes"))) {
-    throw new Error(`no routes/ directory in ${root}; is that the project root?`);
-  }
-  return {
-    root,
-    routeFiles: walk(root, "routes"),
-    islandFiles: walk(root, "islands"),
-    appPath: optional(root, ...sourceNames("app")),
-    shellPath: optional(root, ...sourceNames("routes/_app")),
-    errorPath: optional(root, ...sourceNames("routes/_error")),
-    clientDir: path.join(root, "dist/client"),
-    genDir: path.join(root, ".fu"),
-  };
-}
-
-/** `base` with each extension a route may have, TypeScript first. */
-function sourceNames(base: string): string[] {
-  return [".ts", ".tsx", ".js", ".jsx"].map((ext) => base + ext);
-}
-
-/** Tests and declaration files that sit beside the sources. */
-const NOT_SOURCE = /(\.d\.ts|[._]test\.[tj]sx?)$/;
-
-/**
- * Recursively list source files under `<root>/<sub>`, as root-relative
- * "/sub/a/b.tsx". Underscore-prefixed files and directories are skipped: they
- * are framework files (`routes/_app.tsx`) or an app's own helpers
- * (`routes/_parts/`), not routes. So are tests and `.d.ts` files.
- */
-export function walk(root: string, sub: string): string[] {
-  const out: string[] = [];
-  const visit = (dir: string) => {
-    if (!fs.existsSync(dir)) return;
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const f = path.join(dir, e.name);
-      if (e.name.startsWith("_")) continue;
-      if (e.isDirectory()) visit(f);
-      else if (/\.[tj]sx?$/.test(e.name) && !NOT_SOURCE.test(e.name)) {
-        out.push("/" + path.relative(root, f).split(path.sep).join("/"));
-      }
-    }
-  };
-  visit(path.join(root, sub));
-  return out;
-}
-
-/** Absolute path to an optional project file, or null when absent. */
-export function optional(root: string, ...names: string[]): string | null {
-  for (const n of names) {
-    const p = path.resolve(root, n);
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
+// The project scan lives in project.ts, which imports no bundler; re-exported
+// here, where it always was.
+export { optional, scanProject, walk } from "./project.ts";
+export type { Project } from "./project.ts";
 
 /** Recreate `dir` empty. */
 export function emptyDir(dir: string): void {
@@ -190,30 +120,43 @@ export function clientInput(
   };
 }
 
+/** Conditions a Worker is built with, by celld's and Cloudflare's tooling alike. */
+export const WORKER_CONDITIONS = ["workerd", "worker", "import", "default"];
+
 /**
- * Nitro options both drivers share. `serverDir` is the generated dir, never the
- * project root, or nitro claims `routes/` as its own server routes and shadows
- * the catch-all. Islands are imported on the server too, so SSR needs the same
- * CSS and JSX handling as the client. Stylesheets a route or the shell imports
+ * Rolldown input for the server bundle: the Worker in a build, the dev SSR
+ * module in dev. Islands are imported on the server too, so it needs the same
+ * CSS and JSX handling as the client; stylesheets a route or the shell imports
  * are seen only here, so the caller passes the map the client's sheets go to.
+ *
+ * A Worker resolves packages as celld's bundler would (`workerd`, `worker`),
+ * never through `browser` (the module runs under serve.mjs on Node too) nor
+ * `node` (that would drag in `node:` code celld does not have). A `node:`
+ * import stays an import; one nothing uses is dropped, so a module that
+ * imports `node:fs` for a function the app never calls costs nothing.
  */
-export function nitroOptions(
+export function serverInput(
   project: Project,
-  ssrEntry: string,
-  sheets: Map<string, string> = new Map(),
-  onCss?: () => void,
-): Parameters<typeof createNitro>[0] {
+  input: string,
+  { sheets = new Map(), onCss, dev = false }: {
+    sheets?: Map<string, string>;
+    onCss?: () => void;
+    dev?: boolean;
+  } = {},
+): InputOptions {
   return {
-    rootDir: project.root,
-    serverDir: project.genDir,
-    scanDirs: [],
-    publicAssets: [{ dir: project.clientDir, baseURL: "/" }],
-    handlers: [{ route: "/**", handler: ssrEntry, format: "web", lazy: false }],
-    rollupConfig: {
-      plugins: [...shared(project, sheets, { stampIslands: true }, onCss), strictImports],
-      moduleTypes: { ".css": "js" },
+    input,
+    plugins: [...shared(project, sheets, { stampIslands: true }, onCss), strictImports],
+    // Dev runs the module in the dev server's own process, which is Node,
+    // Deno or Bun: whatever that resolves to is what it can load.
+    platform: dev ? "node" : "neutral",
+    ...(dev ? {} : { resolve: { conditionNames: WORKER_CONDITIONS } }),
+    external: [/^node:/],
+    treeshake: {
+      moduleSideEffects: (id: string, external: boolean) => !(external && id.startsWith("node:")),
     },
-  } as Parameters<typeof createNitro>[0];
+    moduleTypes: { ".css": "js" },
+  } as InputOptions;
 }
 
 /**
@@ -279,43 +222,48 @@ export function writeSheets(
 const lazyImport = (root: string, file: string) =>
   `${JSON.stringify(file)}: () => import(${JSON.stringify(path.resolve(root, "." + file))})`;
 
-/** The client entry: hydrate every island the page carries. */
+/**
+ * The client entry: hydrate every island the page carries, and load the
+ * navigation runtime only if the body opted in. The runtime is reached by a
+ * dynamic import alone, so it is its own chunk and a page without
+ * `data-fu-nav` never fetches it.
+ *
+ * Every byte here is paid by every page of every app, so this is as little
+ * as it can be: the test for the attribute, and nothing waits for anything
+ * (the runtime loads beside the island chunks; it and hydration never touch
+ * the same element, see nav.ts). The one thing that does follow hydration is
+ * the `fu:hydrated` signal, which is not on the runtime's path.
+ */
 export function bootModule(project: Pick<Project, "root" | "islandFiles">): string {
   const manifest = project.islandFiles.map((f) => "  " + lazyImport(project.root, f)).join(",\n");
-  return `import { hydrateIslands } from ${JSON.stringify(runtime.client)};\n` +
-    `hydrateIslands({\n${manifest}\n});\n`;
+  return `import { hydrateIslands, markHydrated } from ${JSON.stringify(runtime.client)};\n` +
+    `const manifest = {\n${manifest}\n};\n` +
+    `hydrateIslands(manifest).then(markHydrated);\n` +
+    `if ("fuNav" in document.body.dataset) {\n` +
+    `  import(${JSON.stringify(runtime.nav)}).then((m) => m.installNav(manifest));\n` +
+    `}\n`;
 }
 
 /**
- * The server entry: the route manifest, the optional app, shell and error
- * page, and the handler wired to nitro.
- *
- * Nitro invokes the handler with an H3Event, not a Request. The event exposes
- * `url`/`headers` directly — which is why routing worked long before anyone
- * read a body — but has no json()/text()/formData(). The real Request is
- * `event.req`.
+ * The server module: the route manifest, the optional app, shell and error
+ * page, wired into one handler, `(request, extra) => Response`. In a build
+ * the client files are served in front of it (see `clientFiles`).
  */
-/**
- * Where nitro's h3 lives, as a path. The generated entry sits in the app,
- * which does not depend on nitro: by name it resolves only where packages are
- * hoisted (npm), not under Deno's or pnpm's layout. Resolved from here, where
- * nitro is a dependency, it is also the copy nitro's own runtime uses.
- */
-function nitroH3(): string {
-  return fileURLToPath(import.meta.resolve("nitro/h3"));
-}
-
 export interface EntryOptions {
-  /** Dev only: the Host names to answer to. Omit to answer to any. */
-  hosts?: readonly string[];
-  /** Build only: the URL prefix the client files are served under, e.g. "/_fu/". */
-  assetsPrefix?: string;
+  /** Build only: the client files' URLs and the prefix they are served under, e.g. "/_fu/". */
+  clientFiles?: { prefix: string; files: readonly string[] };
+  /**
+   * Dev only: the stylesheet the dev server writes, if the app has any. The
+   * entry puts `assets.css` on a page only while this file exists, so an app
+   * without CSS does not request a /style.css that is not there.
+   */
+  devCssFile?: string;
 }
 
 export function ssrModule(
   project: Pick<Project, "root" | "routeFiles" | "appPath" | "shellPath" | "errorPath">,
   assets: Assets,
-  { hosts, assetsPrefix }: EntryOptions = {},
+  { clientFiles, devCssFile }: EntryOptions = {},
 ): string {
   const optionalImports: [name: string, file: string | null][] = [
     ["app", project.appPath],
@@ -323,52 +271,223 @@ export function ssrModule(
     ["ErrorPage", project.errorPath],
   ];
   const present = optionalImports.filter(([, file]) => file);
+  const handler = `createHandler({ manifest, ${
+    devCssFile ? "get assets() { return existsSync(cssFile) ? assets : bare; }" : "assets"
+  }${present.map(([n]) => `, ${n}`).join("")} })`;
   return [
-    `import { createHandler${hosts ? ", onlyHosts" : ""} } from ${JSON.stringify(runtime.render)};`,
-    ...(assetsPrefix ? [`import { HTTPError } from ${JSON.stringify(nitroH3())};`] : []),
+    `import { createHandler } from ${JSON.stringify(runtime.render)};`,
+    ...(clientFiles ? [`import { clientFiles } from ${JSON.stringify(runtime.assets)};`] : []),
+    ...(devCssFile ? [`import { existsSync } from "node:fs";`] : []),
     ...present.map(([name, file]) => `import ${name} from ${JSON.stringify(file)};`),
     `const manifest = {`,
     project.routeFiles.map((f) => "  " + lazyImport(project.root, f)).join(",\n"),
     `};`,
     `const assets = ${JSON.stringify(assets)};`,
-    `const handler = ${hosts ? "onlyHosts(" : ""}createHandler({ manifest, assets${
-      present.map(([n]) => `, ${n}`).join("")
-    } })${hosts ? `, ${JSON.stringify(hosts)})` : ""};`,
-    `const toRequest = (input) => input instanceof Request ? input : (input?.req ?? input);`,
-    ...(assetsPrefix
+    // Two stable objects, read per request: the head tags are cached per object.
+    ...(devCssFile
       ? [
-        // A request only gets here under the asset prefix when no such file
-        // exists. Nitro's route rule would put the assets' year-long max-age
-        // on whatever the app answered, after it answered; an error nitro
-        // renders itself is the one response that rule does not reach.
-        `const underAssets = (path) => path === ${
-          JSON.stringify(assetsPrefix.replace(/\/$/, ""))
-        } || path.startsWith(${JSON.stringify(assetsPrefix)});`,
-        `export default (input) => {`,
-        `  const req = toRequest(input);`,
-        `  if (underAssets(new URL(req.url).pathname)) {`,
-        `    throw new HTTPError({ status: 404, headers: { "cache-control": "no-store" } });`,
-        `  }`,
-        `  return handler(req);`,
-        `};`,
+        `const bare = { ...assets, css: [] };`,
+        `const cssFile = ${JSON.stringify(devCssFile)};`,
       ]
-      : [`export default (input) => handler(toRequest(input));`]),
+      : []),
+    clientFiles
+      ? `export default clientFiles(${handler}, ${JSON.stringify(clientFiles)});`
+      : `export default ${handler};`,
+    ``,
+  ].join("\n");
+}
+
+/** What `worker.ts` exports, as far as the generated Worker entry needs to know. */
+export interface WorkerExports {
+  /** Whether it exports `prepare`, which is called and not re-exported. */
+  prepare: boolean;
+  /** Every other runtime export, re-exported from the Worker as it is. */
+  names: string[];
+}
+
+/** Minimal slice of the oxc AST `workerExports` walks. */
+interface ExportNode {
+  type: string;
+  exportKind?: string;
+  source?: unknown;
+  declaration?: {
+    type: string;
+    declare?: boolean;
+    const?: boolean;
+    id?: { name?: string };
+    declarations?: { id?: { type?: string; name?: string }; init?: { type?: string } | null }[];
+  } | null;
+  specifiers?: { exportKind?: string; exported?: { name?: string; value?: string } }[];
+}
+
+const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*$/u;
+
+const FUNCTION_EXPRESSIONS = new Set(["ArrowFunctionExpression", "FunctionExpression"]);
+
+/**
+ * Read `worker.ts`'s exports. celld refuses a Worker module whose exports are
+ * not all handlers or classes, and the Worker's default export is fu's, so a
+ * default export here is refused, as is `export *` (its names cannot be known
+ * without bundling). `prepare` must be a function; one that visibly is not is
+ * refused here, any other is checked when it is called.
+ */
+export function workerExports(file: string, source: string): WorkerExports {
+  const parsed = parseSync(file, source, { sourceType: "module", lang: "tsx" });
+  const body = (parsed.program as unknown as { body: ExportNode[] }).body ?? [];
+  const names: string[] = [];
+  const fail = (why: string): never => {
+    throw new Error(`fu: ${file}: ${why}`);
+  };
+  for (const node of body) {
+    if (node.exportKind === "type") continue;
+    if (node.type === "ExportDefaultDeclaration") {
+      fail("a default export is not allowed; the Worker's default export is fu's request handler");
+    }
+    if (node.type === "ExportAllDeclaration") {
+      fail("`export *` is not allowed; name what the Worker exports");
+    }
+    if (node.type !== "ExportNamedDeclaration") continue;
+    const decl = node.declaration;
+    // `declare` and `const enum` leave no binding behind to re-export.
+    if (decl?.declare || (decl?.type === "TSEnumDeclaration" && decl.const)) continue;
+    if (decl?.type === "VariableDeclaration") {
+      for (const d of decl.declarations ?? []) {
+        if (d.id?.type !== "Identifier" || !d.id.name) {
+          fail("destructured exports are not allowed; export each binding by name");
+        }
+        if (d.id!.name === "prepare" && d.init && !FUNCTION_EXPRESSIONS.has(d.init.type ?? "")) {
+          fail("`prepare` must be a function");
+        }
+        names.push(d.id!.name!);
+      }
+    } else if (decl?.type === "ClassDeclaration" && decl.id?.name === "prepare") {
+      fail("`prepare` must be a function, not a class");
+    } else if (decl?.id?.name) {
+      // A TypeScript declaration (interface, type, enum) has no runtime value
+      // unless it is an enum; neither is a handler, so only those that oxc
+      // reports as values reach here.
+      if (decl.type.startsWith("TS") && decl.type !== "TSEnumDeclaration") continue;
+      names.push(decl.id.name);
+    } else {
+      for (const sp of node.specifiers ?? []) {
+        if (sp.exportKind === "type") continue;
+        const name = sp.exported?.name ?? sp.exported?.value;
+        if (name === "default") {
+          fail(
+            "a default export is not allowed; the Worker's default export is fu's request handler",
+          );
+        }
+        // `export { x as "a-b" }` is valid, but the generated re-export
+        // spells names bare, and celld's entrypoints are names a binding takes.
+        if (name && !IDENTIFIER.test(name)) {
+          fail(`export ${JSON.stringify(name)} is not a JavaScript name`);
+        }
+        if (name) names.push(name);
+      }
+    }
+  }
+  return { prepare: names.includes("prepare"), names: names.filter((n) => n !== "prepare") };
+}
+
+/**
+ * The Worker entry: what celld runs. `prepare(env)` runs once per isolate,
+ * before any of the app's modules: the app graph is a dynamic import, which
+ * the bundle keeps lazy, so module-scope code in a route sees what `prepare`
+ * set up. A `prepare` that fails is tried again on the next request; a route
+ * module that throws at module scope fails every request, as an import would.
+ */
+export function workerModule(
+  workerPath: string | null,
+  exports: WorkerExports,
+  ssr = "./ssr.ts",
+): string {
+  const from = JSON.stringify(workerPath);
+  return [
+    ...(workerPath && exports.prepare ? [`import { prepare } from ${from};`] : []),
+    ...(workerPath && exports.names.length
+      ? [`export { ${exports.names.join(", ")} } from ${from};`]
+      : []),
+    `let ready;`,
+    `function load(env) {`,
+    `  return ready ??= Promise.resolve()`,
+    ...(exports.prepare
+      ? [
+        `    .then(() => {`,
+        `      if (typeof prepare !== "function") throw new TypeError("fu: worker.ts: prepare is not a function");`,
+        `      return prepare(env);`,
+        `    })`,
+      ]
+      : []),
+    `    .then(() => import(${JSON.stringify(ssr)}))`,
+    `    .then((m) => m.default, (err) => {`,
+    `      ready = undefined;`,
+    `      throw err;`,
+    `    });`,
+    `}`,
+    `export default {`,
+    `  async fetch(request, env = {}, ctx) {`,
+    `    const handler = await load(env);`,
+    `    return handler(request, {`,
+    `      env,`,
+    `      waitUntil: ctx ? (p) => ctx.waitUntil(p) : undefined,`,
+    `      assets: env.ASSETS ?? null,`,
+    `    });`,
+    `  },`,
+    `};`,
     ``,
   ].join("\n");
 }
 
 /**
- * Write the generated server entry and return its path. It has to be a real
- * file: nitro path-resolves `handlers[].handler`, so a virtual id would not
- * survive its routing codegen.
+ * The runner: serve.mjs, beside the Worker it serves. The Worker stays a
+ * separate file, imported, so the code that runs is the code celld would run.
  */
+export function runnerModule(): string {
+  return [
+    `import worker from "./index.mjs";`,
+    `import { serveWorker } from ${JSON.stringify(runtime.serve)};`,
+    `import { fileURLToPath } from "node:url";`,
+    `const served = await serveWorker(worker, {`,
+    `  publicDir: fileURLToPath(new URL("../public/", import.meta.url)),`,
+    `});`,
+    `console.log(\`[fu] serving \${served.url}\`);`,
+    ``,
+  ].join("\n");
+}
+
+/** Write a generated module into the project's generated dir and return its path. */
+export function writeGenerated(project: Project, name: string, source: string): string {
+  fs.mkdirSync(project.genDir, { recursive: true });
+  const file = path.join(project.genDir, name);
+  fs.writeFileSync(file, source);
+  return file;
+}
+
+/** Recreate the generated dir empty and write the server module into it. */
 export function writeSsrEntry(
   project: Project,
   assets: Assets,
   opts?: EntryOptions,
 ): string {
   emptyDir(project.genDir);
-  const file = path.join(project.genDir, "ssr.ts");
-  fs.writeFileSync(file, ssrModule(project, assets, opts));
-  return file;
+  return writeGenerated(project, "ssr.ts", ssrModule(project, assets, opts));
+}
+
+/** The Worker entry for `project`, written beside the server module. */
+export function writeWorkerEntry(project: Project): string {
+  const exports = project.workerPath
+    ? workerExports(project.workerPath, fs.readFileSync(project.workerPath, "utf8"))
+    : { prepare: false, names: [] };
+  return writeGenerated(project, "worker.ts", workerModule(project.workerPath, exports));
+}
+
+/** The URLs of the files under `clientDir`, as served under `prefix`. */
+export function clientFileUrls(clientDir: string, prefix: string): string[] {
+  return fs.readdirSync(clientDir, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) =>
+      prefix +
+      path.relative(clientDir, path.join(e.parentPath, e.name)).split(path.sep).join("/")
+    )
+    .sort();
 }

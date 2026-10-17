@@ -11,8 +11,14 @@ function ctx(path = "/"): Ctx<S> {
     req: new Request("http://x" + path),
     url: new URL("http://x" + path),
     params: {},
+    rawParams: {},
     state: { trail: [] },
     head: {},
+    response: { status: 200, headers: new Headers() },
+    partial: false,
+    env: {},
+    waitUntil: () => {},
+    assets: null,
     next: () => Promise.reject(new Error("not composed")),
   };
 }

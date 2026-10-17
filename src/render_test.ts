@@ -1,6 +1,25 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
-import { Component, h } from "preact";
-import { createHandler, document, onlyHosts } from "./render.ts";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { Component, Fragment, h } from "preact";
+import { renderToString } from "preact-render-to-string";
+import {
+  __resetWarningsForTest,
+  createHandler,
+  document,
+  FuHead,
+  FuScripts,
+  headMarker,
+  MARKER_TOKEN,
+  onlyHosts,
+  Partial,
+  scriptsMarker,
+} from "./render.ts";
+import {
+  BUILD_ATTR,
+  BUILD_PARAM,
+  BUILD_RELOAD_HEADER,
+  NAV_ATTR,
+  PARTIAL_PARAM,
+} from "./nav-protocol.ts";
 import { App } from "./app.ts";
 import { HttpError } from "./errors.ts";
 import type { Assets, Ctx, RouteManifest } from "./types.ts";
@@ -485,6 +504,50 @@ Deno.test("the islands a page rendered are preloaded, and only those", async () 
   assertEquals((await (await get(handler, "/plain")).text()).includes("modulepreload"), false);
 });
 
+Deno.test("an island's list of chunks is preloaded with it, each chunk once per page", async () => {
+  // A build maps an island to its chunk and that chunk's static imports.
+  const A = Object.assign(() => h("b", null, "a"), { __island: "/islands/A.tsx" });
+  const B = Object.assign(() => h("b", null, "b"), { __island: "/islands/B.tsx" });
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({ default: () => h("p", null, h(A, null), h(B, null), h(A, null)) }),
+      "/routes/b.tsx": () => Promise.resolve({ default: () => h("p", null, h(B, null)) }),
+      "/routes/plain.tsx": () => Promise.resolve({ default: () => h("p", null) }),
+    },
+    assets: {
+      js: [],
+      css: [],
+      preload: [{ href: "/_fu/preact.js" }],
+      islands: {
+        "/islands/A.tsx": ["/_fu/A.js", "/_fu/jsx.js", "/_fu/shared.js"],
+        "/islands/B.tsx": ["/_fu/B.js", "/_fu/shared.js", "/_fu/jsx.js", "/_fu/onlyB.js"],
+        "/islands/C.tsx": ["/_fu/C.js", "/_fu/onlyC.js"],
+      },
+    },
+  });
+  const preloads = async (path: string) =>
+    [...(await (await get(handler, path)).text()).matchAll(/rel="modulepreload" href="([^"]+)"/g)]
+      .map((m) => m[1]);
+  // What every page preloads, then what these islands import, then the islands.
+  assertEquals(await preloads("/"), [
+    "/_fu/preact.js",
+    "/_fu/jsx.js",
+    "/_fu/shared.js",
+    "/_fu/onlyB.js",
+    "/_fu/A.js",
+    "/_fu/B.js",
+  ]);
+  assertEquals(await preloads("/b"), [
+    "/_fu/preact.js",
+    "/_fu/shared.js",
+    "/_fu/jsx.js",
+    "/_fu/onlyB.js",
+    "/_fu/B.js",
+  ]);
+  assertEquals(await preloads("/plain"), ["/_fu/preact.js"]);
+});
+
 Deno.test("a function deep inside an island's props is refused too", async () => {
   const Island = (_props: { a: unknown }) => h("i", null);
   (Island as unknown as { __island: string }).__island = "/islands/D.tsx";
@@ -504,4 +567,989 @@ Deno.test("a function deep inside an island's props is refused too", async () =>
     console.error = origError;
   }
   assertStringIncludes(String(logged.find((e) => e instanceof Error)), 'prop "pick"');
+});
+
+Deno.test("a handler can set the status and headers of its rendered page", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.status = 203;
+              ctx.response.headers.set("last-modified", "Thu, 01 Jan 2026 00:00:00 GMT");
+              ctx.response.headers.set("cache-control", "public, max-age=60");
+              return { ok: true };
+            },
+          },
+          default: () => h("p", null, "home"),
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/home");
+  assertEquals(res.status, 203);
+  assertEquals(res.headers.get("last-modified"), "Thu, 01 Jan 2026 00:00:00 GMT");
+  assertEquals(res.headers.get("cache-control"), "public, max-age=60");
+  assertEquals(res.headers.get("content-type"), "text/html; charset=utf-8");
+  assertStringIncludes(await res.text(), "<p>home</p>");
+});
+
+Deno.test("ctx.response is ignored when the handler throws, so an error stays uncacheable", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.status = 203;
+              ctx.response.headers.set("cache-control", "public, max-age=60");
+              ctx.response.headers.set("x-from-handler", "1");
+              throw new HttpError(404);
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/home");
+  assertEquals(res.status, 404);
+  assertEquals(res.headers.get("cache-control"), "no-store");
+  assertEquals(res.headers.get("x-from-handler"), null);
+});
+
+Deno.test("ctx.response is ignored when the handler returns a Response", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/api.ts": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.status = 203;
+              return new Response("raw", { status: 201 });
+            },
+          },
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/api");
+  assertEquals(res.status, 201);
+});
+
+Deno.test("middleware sees the same ctx.response object the handler wrote to", async () => {
+  let seen: string | null = null;
+  const app = new App().use(async (ctx) => {
+    const res = await ctx.next();
+    seen = ctx.response.headers.get("x-page");
+    return res;
+  });
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.headers.set("x-page", "home");
+              return null;
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+    app,
+  });
+  await get(handler, "/home");
+  assertEquals(seen, "home");
+});
+
+Deno.test("a status outside 200-599 on ctx.response is a programming error", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.status = 99;
+              return null;
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+  });
+  const origError = console.error;
+  console.error = () => {};
+  try {
+    assertEquals((await get(handler, "/home")).status, 500);
+  } finally {
+    console.error = origError;
+  }
+});
+
+Deno.test("a rendered page with an error status on ctx.response is forced to no-store", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.status = 404;
+              ctx.response.headers.set("cache-control", "public, max-age=60");
+              return null;
+            },
+          },
+          default: () => h("p", null, "gone"),
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/home");
+  assertEquals(res.status, 404);
+  assertEquals(res.headers.get("cache-control"), "no-store");
+  await res.body?.cancel();
+});
+
+Deno.test("set-cookie appended twice on ctx.response reaches the response as two cookies", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/home.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.response.headers.append("set-cookie", "a=1; Path=/");
+              ctx.response.headers.append("set-cookie", "b=2; Path=/");
+              return null;
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+  });
+  const res = await get(handler, "/home");
+  assertEquals(res.headers.getSetCookie(), ["a=1; Path=/", "b=2; Path=/"]);
+  await res.body?.cancel();
+});
+
+Deno.test("a bodiless status (204, 205, 304) on ctx.response is a programming error", async () => {
+  const origError = console.error;
+  console.error = () => {};
+  try {
+    for (const status of [204, 205, 304]) {
+      const handler = createHandler({
+        manifest: {
+          "/routes/home.tsx": () =>
+            Promise.resolve({
+              handlers: {
+                GET: (ctx: Ctx) => {
+                  ctx.response.status = status;
+                  return null;
+                },
+              },
+              default: () => h("p", null),
+            }),
+        },
+        assets,
+      });
+      const logged: unknown[] = [];
+      console.error = (...a: unknown[]) => logged.push(...a);
+      const res = await get(handler, "/home");
+      assertEquals(res.status, 500, String(status));
+      await res.body?.cancel();
+      const err = logged.find((e) => e instanceof Error);
+      assertEquals(err instanceof RangeError, true, String(status));
+    }
+  } finally {
+    console.error = origError;
+  }
+});
+
+const HEAD_MARKER = headMarker();
+const SCRIPTS_MARKER = scriptsMarker();
+
+Deno.test("the marker components render the exact strings document() replaces", () => {
+  // Pinned so a renderer upgrade that changes attribute or self-closing
+  // output fails here, not silently in production.
+  assertEquals(renderToString(h(FuHead, null)), HEAD_MARKER);
+  assertEquals(renderToString(h(FuScripts, null)), SCRIPTS_MARKER);
+  assertEquals(HEAD_MARKER, `<fu-marker data-fu="head" data-k="${MARKER_TOKEN}"></fu-marker>`);
+  assertEquals(/^[0-9a-f]{16}$/.test(MARKER_TOKEN), true);
+});
+
+Deno.test("raw HTML cannot relocate fu's tags: a marker without the token is left alone", () => {
+  // dangerouslySetInnerHTML could carry a marker-shaped string; without the
+  // per-process token it is just markup, and the real marker still wins.
+  const forged = '<fu-marker data-fu="scripts" data-k="0000000000000000"></fu-marker>';
+  const body =
+    `<html><head>${HEAD_MARKER}</head><body><div>${forged}</div>${SCRIPTS_MARKER}</body></html>`;
+  const html = document(body, {}, assets);
+  assertStringIncludes(
+    html,
+    `<div>${forged}</div><script type="module" src="/boot.js"></script></body>`,
+  );
+});
+
+Deno.test("a marker that occurs twice is a shell bug and fails the render", () => {
+  const body =
+    `<html><head>${HEAD_MARKER}</head><body>${SCRIPTS_MARKER}${SCRIPTS_MARKER}</body></html>`;
+  let err: unknown;
+  try {
+    document(body, {}, assets);
+  } catch (e) {
+    err = e;
+  }
+  assertStringIncludes(String(err), "FuScripts");
+});
+
+Deno.test("a shell that renders <html> owns the document and gets the tags at its markers", () => {
+  const body = `<html lang="fi" data-x="1"><head><meta charset="utf-8">${HEAD_MARKER}` +
+    `<link rel="ai-info" href="/llms.txt"></head><body data-view="landing">B${SCRIPTS_MARKER}</body></html>`;
+  const html = document(body, { title: "T", robots: "noindex" }, {
+    ...assets,
+    preload: [{ href: "/_fu/jsxRuntime-x.js" }],
+    islands: { "/islands/W.tsx": "/_fu/W-abc.js" },
+  }, ["/islands/W.tsx"]);
+  assertEquals(html.startsWith('<!doctype html><html lang="fi" data-x="1"><head>'), true);
+  assertEquals(html.match(/<!doctype html>/gi)?.length, 1);
+  // Only one charset: the shell's.
+  assertEquals(html.match(/charset="utf-8"/g)?.length, 1);
+  assertEquals(html.includes("viewport"), false);
+  const headAt = html.indexOf("<title>T</title>");
+  const cssAt = html.indexOf('<link rel="stylesheet" href="/style.css">');
+  const sharedAt = html.indexOf('<link rel="modulepreload" href="/_fu/jsxRuntime-x.js">');
+  const islandAt = html.indexOf('<link rel="modulepreload" href="/_fu/W-abc.js">');
+  const aiAt = html.indexOf('<link rel="ai-info"');
+  assertEquals(headAt > 0 && headAt < cssAt && cssAt < sharedAt && sharedAt < islandAt, true);
+  assertEquals(islandAt < aiAt, true);
+  assertStringIncludes(html, '<meta name="robots" content="noindex">');
+  assertStringIncludes(html, 'B<script type="module" src="/boot.js"></script></body></html>');
+  assertEquals(html.includes("fu-marker"), false);
+});
+
+Deno.test("an owned document is recognised with an upper-case doctype and leading whitespace", () => {
+  const body =
+    `\n  <!DOCTYPE html>\n<html><head>${HEAD_MARKER}</head><body>${SCRIPTS_MARKER}</body></html>`;
+  const html = document(body, {}, assets);
+  assertEquals(html.match(/doctype/gi)?.length, 1);
+  assertEquals(html.startsWith("<!doctype html><html><head>"), true);
+  assertStringIncludes(html, '<link rel="stylesheet" href="/style.css">');
+});
+
+Deno.test("an owned document without a scripts marker gets no boot script and warns once", () => {
+  const origWarn = console.warn;
+  const warned: unknown[] = [];
+  console.warn = (...a: unknown[]) => warned.push(a.join(" "));
+  __resetWarningsForTest();
+  try {
+    const body = `<html><head>${HEAD_MARKER}</head><body>no islands here</body></html>`;
+    const first = document(body, {}, assets);
+    const second = document(body, {}, assets);
+    assertEquals(first.includes("<script"), false);
+    assertEquals(second.includes("<script"), false);
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(warned.filter((w) => String(w).includes("FuScripts")).length, 1);
+});
+
+Deno.test("a missing head marker warns that ctx.head fields are not emitted either", () => {
+  const origWarn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...a: unknown[]) => warned.push(a.join(" "));
+  __resetWarningsForTest();
+  try {
+    document(`<html><head></head><body>${SCRIPTS_MARKER}</body></html>`, { title: "T" }, assets);
+  } finally {
+    console.warn = origWarn;
+  }
+  const msg = warned.find((w) => w.includes("FuHead")) ?? "";
+  assertStringIncludes(msg, "ctx.head");
+  assertStringIncludes(msg, "title");
+  assertStringIncludes(msg, "robots");
+});
+
+Deno.test("a comment or a legacy doctype before <html> still marks an owned document", () => {
+  const rest = `<html><head>${HEAD_MARKER}</head><body>${SCRIPTS_MARKER}</body></html>`;
+  for (
+    const lead of [
+      "<!-- rendered by x -->\n",
+      '<!DOCTYPE html SYSTEM "about:legacy-compat">',
+      "<!-- a -->\n<!doctype html><!-- b -->\n",
+    ]
+  ) {
+    const html = document(lead + rest, {}, assets);
+    assertEquals(html.match(/<!doctype/gi)?.length, 1, lead);
+    assertEquals(html.startsWith("<!doctype html><"), true, lead);
+    assertStringIncludes(html, '<html><head><link rel="stylesheet" href="/style.css">');
+    assertEquals(html.includes("fu-marker"), false, lead);
+  }
+});
+
+Deno.test("the leading comments of an owned document are kept, after the doctype", () => {
+  const rest = `<html><head>${HEAD_MARKER}</head><body>${SCRIPTS_MARKER}</body></html>`;
+  const out = (lead: string) => document(lead + rest, {}, assets).split("<html>")[0];
+  assertEquals(out("<!-- rendered by x -->\n"), "<!doctype html><!-- rendered by x -->");
+  assertEquals(
+    out(" <!-- a -->\n<!DOCTYPE html>\n<!-- b --><!---->\n"),
+    "<!doctype html><!-- a --><!-- b --><!---->",
+  );
+  assertEquals(out("<!doctype html>"), "<!doctype html>");
+  assertEquals(out(""), "<!doctype html>");
+});
+
+Deno.test("only comments and a doctype may precede <html> in an owned document", () => {
+  const wrapped = (body: string) => {
+    const html = document(body, {}, assets);
+    // fu's own document around it: the body is inside <body>, whole.
+    assertStringIncludes(html, `<body>${body}<script`, body);
+  };
+  // A comment, content, another comment, then <html>: the content is the
+  // page. Taking this for an owned document would delete the <p>.
+  wrapped("<!-- a --><p>x</p><!-- b --><html><head></head><body></body></html>");
+  wrapped("<p>x</p><html></html>");
+  wrapped("<!-- never closed <html><head></head></html>");
+  wrapped("<!doctype html><!doctype html><html></html>");
+  wrapped("<!doctype svg><html></html>");
+  wrapped("<htmlx></htmlx>");
+  wrapped("<!-- a -->");
+});
+
+Deno.test("deciding ownership is linear in the number of leading comments", () => {
+  // The first matcher was a regex that backtracked exponentially: 26 empty
+  // comments before a <div> took about 20 seconds, and each further comment
+  // doubled it. The scanner takes well under a millisecond for 5000, so the
+  // bound is loose enough for any loaded machine and still far below what
+  // exponential, or even quadratic with a large constant, would need.
+  const LIMIT_MS = 2000;
+  for (const n of [26, 5000]) {
+    const body = "<!---->".repeat(n) + "<div>x</div>";
+    const start = performance.now();
+    const html = document(body, {}, assets);
+    const ms = performance.now() - start;
+    assertEquals(ms < LIMIT_MS, true, `${n} comments took ${ms} ms`);
+    assertStringIncludes(html, "<body><!----><!---->");
+  }
+  const owned = "<!-- c -->".repeat(5000) + "<html><head></head><body></body></html>";
+  __resetWarningsForTest();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const start = performance.now();
+    const html = document(owned, {}, assets);
+    assertEquals(performance.now() - start < LIMIT_MS, true);
+    assertEquals(html.startsWith("<!doctype html><!-- c --><!-- c -->"), true);
+  } finally {
+    console.warn = warn;
+    __resetWarningsForTest();
+  }
+});
+
+Deno.test("the marker token never reaches a client when the shell does not own the document", () => {
+  const origWarn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...a: unknown[]) => warned.push(a.join(" "));
+  __resetWarningsForTest();
+  try {
+    const html = document(`<div>B${HEAD_MARKER}${SCRIPTS_MARKER}</div>`, {}, assets);
+    assertEquals(html.includes(MARKER_TOKEN), false);
+    assertEquals(html.includes("fu-marker"), false);
+    // Hydration is unchanged: the boot script is where the wrapped document puts it.
+    assertStringIncludes(
+      html,
+      '<body><div>B</div><script type="module" src="/boot.js"></script></body>',
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(
+    warned.filter((w) => w.includes("outside a document-owning shell")).length,
+    1,
+  );
+});
+
+Deno.test("a non-owned document is byte-identical to what v0.4.3 produced", () => {
+  // The expectation was verified by executing v0.4.3's document(): identical
+  // across a 360-case matrix of head fields and asset lists.
+  const html = document(
+    '<div data-island="x">B</div>',
+    { title: "T & U", description: "D", lang: "fi", jsonLd: { a: "</b>" } },
+    {
+      js: [{ href: "/b.js" }],
+      css: [{ href: "/s.css" }],
+      preload: [{ href: "/p.js" }],
+      islands: { "/islands/W.tsx": "/_fu/W.js" },
+    },
+    ["/islands/W.tsx"],
+  );
+  assertEquals(
+    html,
+    '<!doctype html><html lang="fi"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      "<title>T &amp; U</title>" +
+      '<meta name="description" content="D">' +
+      '<meta property="og:title" content="T &amp; U">' +
+      '<meta property="og:description" content="D">' +
+      '<link rel="stylesheet" href="/s.css">' +
+      '<link rel="modulepreload" href="/p.js">' +
+      '<link rel="modulepreload" href="/_fu/W.js">' +
+      '<script type="application/ld+json">{"a":"\\u003c/b>"}</script>' +
+      '</head><body><div data-island="x">B</div><script type="module" src="/b.js"></script>' +
+      "</body></html>",
+  );
+});
+
+const Island = Object.assign(() => h("i", null, "isl"), { __island: "/islands/W.tsx#default" });
+const owningAssets: Assets = {
+  js: [{ href: "/boot.js" }],
+  css: [{ href: "/style.css" }],
+  islands: { "/islands/W.tsx": "/_fu/W-abc.js" },
+};
+const ownManifest: RouteManifest = {
+  "/routes/index.tsx": () => Promise.resolve({ default: () => h("main", null, h(Island, null)) }),
+};
+const ownShell = ({ children }: { children: unknown }) =>
+  h(
+    "html",
+    { lang: "fi" },
+    h("head", null, h(FuHead, null)),
+    h("body", null, children as never, h(FuScripts, null)),
+  );
+
+Deno.test("handler: a 200 page through an owning shell gets css, island preload and boot script", async () => {
+  const handler = createHandler({
+    manifest: ownManifest,
+    assets: owningAssets,
+    Shell: ownShell as never,
+  });
+  const res = await get(handler, "/");
+  const html = await res.text();
+  assertEquals(res.status, 200);
+  assertEquals(html.match(/<!doctype html>/gi)?.length, 1);
+  assertEquals(html.includes("fu-marker"), false);
+  assertEquals(html.includes(MARKER_TOKEN), false);
+  assertStringIncludes(html, '<head><link rel="stylesheet" href="/style.css">');
+  assertStringIncludes(html, '<link rel="modulepreload" href="/_fu/W-abc.js">');
+  assertStringIncludes(html, '<script type="module" src="/boot.js"></script></body></html>');
+});
+
+Deno.test("handler: a 404 rendered through _error and the owning shell gets the same tags", async () => {
+  const handler = createHandler({
+    manifest: ownManifest,
+    assets: owningAssets,
+    Shell: ownShell as never,
+    ErrorPage: (ctx) => h("section", null, String(ctx.error?.status)),
+  });
+  const res = await get(handler, "/missing");
+  const html = await res.text();
+  assertEquals(res.status, 404);
+  assertEquals(res.headers.get("cache-control"), "no-store");
+  assertEquals(html.match(/<!doctype html>/gi)?.length, 1);
+  assertStringIncludes(html, "<section>404</section>");
+  assertStringIncludes(html, '<link rel="stylesheet" href="/style.css">');
+  assertStringIncludes(html, '<script type="module" src="/boot.js"></script></body></html>');
+  assertEquals(html.includes(MARKER_TOKEN), false);
+});
+
+/** An owning shell that writes its own title and robots tag, as a real one does. */
+const titledShell = ({ ctx, children }: { ctx: Ctx; children: unknown }) =>
+  h(
+    "html",
+    { lang: "fi" },
+    h(
+      "head",
+      null,
+      h("title", null, ctx.error ? "Oops" : "Site"),
+      ctx.error && h("meta", { name: "robots", content: "noindex, nofollow" }),
+      h(FuHead, null),
+    ),
+    h("body", null, children as never, h(FuScripts, null)),
+  );
+
+Deno.test("an owning shell owns the error page's head: fu adds no title or robots of its own", async () => {
+  // The shell writes its own; fu's defaults beside them were a second <title>,
+  // a second robots tag and an og:title nobody asked for.
+  const handler = createHandler({
+    manifest: {
+      "/routes/todo.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              ctx.head.title = "Todo 1";
+              ctx.head.canonical = "http://x/todo";
+              throw new HttpError(404);
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets: owningAssets,
+    Shell: titledShell as never,
+    ErrorPage: (ctx) => h("section", null, String(ctx.error?.status)),
+    app: new App().use((ctx) => {
+      ctx.head.links = [{ rel: "preconnect", href: "https://t.example" }];
+      return ctx.next();
+    }),
+  });
+  for (const path of ["/missing", "/todo"]) {
+    const res = await get(handler, path);
+    assertEquals([res.status, res.headers.get("cache-control")], [404, "no-store"]);
+    assertEquals(
+      await res.text(),
+      '<!doctype html><html lang="fi"><head><title>Oops</title>' +
+        '<meta name="robots" content="noindex, nofollow"/>' +
+        // What the failed page said is gone; what the app set for every page stays.
+        '<link rel="preconnect" href="https://t.example">' +
+        '<link rel="stylesheet" href="/style.css"></head>' +
+        '<body><section>404</section><script type="module" src="/boot.js"></script>' +
+        "</body></html>",
+      path,
+    );
+  }
+});
+
+Deno.test("an owning shell still gets the head fields the app set on the error path", async () => {
+  // Only fu's own defaults are withheld. A value the error page (or the shell,
+  // or a middleware on the way out) wrote is the app's, even when it is the
+  // very string fu would have used.
+  const plainShell = ownShell;
+  for (
+    const [set, want] of [
+      [(c: Ctx) => (c.head.robots = "noindex"), '<meta name="robots" content="noindex">'],
+      [
+        (c: Ctx) => (c.head.title = "404 Not Found"),
+        '<title>404 Not Found</title><meta property="og:title" content="404 Not Found">',
+      ],
+      [
+        (c: Ctx) => (c.head.description = "D"),
+        '<meta name="description" content="D"><meta property="og:description" content="D">',
+      ],
+      [() => {}, ""],
+    ] as const
+  ) {
+    const handler = createHandler({
+      manifest: {},
+      assets: owningAssets,
+      Shell: plainShell as never,
+      ErrorPage: (ctx) => {
+        set(ctx);
+        return h("section", null, "e");
+      },
+    });
+    const html = await (await get(handler, "/missing")).text();
+    assertStringIncludes(html, `<head>${want}<link rel="stylesheet" href="/style.css"></head>`);
+  }
+});
+
+Deno.test("on the error path: a head field from middleware is reset; copying the head onto itself adopts the defaults", async () => {
+  const render = async (edit: (ctx: Ctx) => void) => {
+    const handler = createHandler({
+      manifest: {},
+      assets: { js: [], css: [] },
+      Shell: ownShell as never,
+      ErrorPage: (ctx) => {
+        edit(ctx);
+        return h("i", null);
+      },
+      app: new App().use((ctx) => {
+        ctx.head.description = "set before next()";
+        ctx.head.links = [{ rel: "preconnect", href: "https://t.example" }];
+        return ctx.next();
+      }),
+    });
+    const html = await (await get(handler, "/missing")).text();
+    return html.slice(html.indexOf("<head>") + 6, html.indexOf("</head>"));
+  };
+  // Only `links` (and `lang`) outlive the reset.
+  assertEquals(await render(() => {}), '<link rel="preconnect" href="https://t.example">');
+  // Assignment is what makes a field the app's, and this assigns them all.
+  assertEquals(
+    await render((ctx) => Object.assign(ctx.head, { ...ctx.head })),
+    '<title>404 Not Found</title><meta name="robots" content="noindex">' +
+      '<meta property="og:title" content="404 Not Found">' +
+      '<link rel="preconnect" href="https://t.example">',
+  );
+});
+
+Deno.test("fu's own document keeps its error title and robots, to the byte", async () => {
+  const seen: unknown[] = [];
+  const handler = createHandler({
+    manifest: {},
+    assets,
+    ErrorPage: (ctx) => {
+      // Readable while the error page renders, as they always were.
+      seen.push(ctx.head.title, ctx.head.robots, Object.keys(ctx.head), { ...ctx.head });
+      return h("section", null, "e");
+    },
+    app: new App().use((ctx) => {
+      ctx.head.lang = "fi";
+      return ctx.next();
+    }),
+  });
+  assertEquals(
+    await (await get(handler, "/missing")).text(),
+    '<!doctype html><html lang="fi"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>404 Not Found</title><meta name="robots" content="noindex">' +
+      '<meta property="og:title" content="404 Not Found">' +
+      '<link rel="stylesheet" href="/style.css"></head><body><section>e</section>' +
+      '<script type="module" src="/boot.js"></script></body></html>',
+  );
+  assertEquals(seen, [
+    "404 Not Found",
+    "noindex",
+    ["title", "robots", "lang"],
+    { title: "404 Not Found", robots: "noindex", lang: "fi" },
+  ]);
+});
+
+Deno.test("in fu's own document an error page can still replace or remove the defaults", async () => {
+  const render = async (edit: (ctx: Ctx) => void) => {
+    const handler = createHandler({
+      manifest: {},
+      assets: { js: [], css: [] },
+      ErrorPage: (ctx) => {
+        edit(ctx);
+        return h("i", null);
+      },
+    });
+    const html = await (await get(handler, "/missing")).text();
+    return html.slice(html.indexOf('initial-scale=1">') + 17, html.indexOf("</head>"));
+  };
+  assertEquals(
+    await render((c) => {
+      c.head.title = "Gone";
+      c.head.robots = "noindex, nofollow";
+    }),
+    '<title>Gone</title><meta name="robots" content="noindex, nofollow">' +
+      '<meta property="og:title" content="Gone">',
+  );
+  assertEquals(
+    await render((c) => {
+      delete c.head.title;
+      c.head.robots = undefined;
+    }),
+    "",
+  );
+});
+
+Deno.test("handler: a shell that renders <FuScripts/> twice is a 500 without the token", async () => {
+  const twice = ({ children }: { children: unknown }) =>
+    h(
+      "html",
+      null,
+      h("head", null, h(FuHead, null)),
+      h("body", null, children as never, h(FuScripts, null), h(FuScripts, null)),
+    );
+  const handler = createHandler({
+    manifest: ownManifest,
+    assets: owningAssets,
+    Shell: twice as never,
+    ErrorPage: (ctx) => h("section", null, String(ctx.error?.status)),
+  });
+  const origError = console.error;
+  console.error = () => {};
+  try {
+    const res = await get(handler, "/");
+    const body = await res.text();
+    assertEquals(res.status, 500);
+    assertEquals(body.includes(MARKER_TOKEN), false);
+    assertEquals(body.includes("fu-marker"), false);
+  } finally {
+    console.error = origError;
+  }
+});
+
+Deno.test("Partial renders comment markers around its children, in body and head alike", () => {
+  const html = document(
+    renderToString(
+      h(Fragment, null, h(Partial, { name: "content" }, h("p", null, "x")), h("i", null)),
+    ),
+    {},
+    assets,
+  );
+  assertStringIncludes(html, "<!--fu:p:content--><p>x</p><!--/fu:p--><i></i>");
+  assertEquals(html.includes("fu-marker"), false);
+
+  // This owned document has no FuHead/FuScripts markers, which warns; silence it.
+  __resetWarningsForTest();
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const owned = document(
+      `<html><head>${
+        renderToString(h(Partial, { name: "head-dynamic" }, h("title", null, "T")))
+      }</head><body></body></html>`,
+      {},
+      assets,
+    );
+    assertStringIncludes(
+      owned,
+      "<head><!--fu:p:head-dynamic--><title>T</title><!--/fu:p--></head>",
+    );
+  } finally {
+    console.warn = origWarn;
+    __resetWarningsForTest();
+  }
+});
+
+Deno.test("a Partial survives a non-owning shell, where stray head/scripts markers are stripped", () => {
+  __resetWarningsForTest();
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const html = document(
+      renderToString(
+        h(Fragment, null, h(FuHead, null), h(Partial, { name: "main" }, h("p", null, "m"))),
+      ),
+      {},
+      assets,
+    );
+    assertStringIncludes(html, "<body><!--fu:p:main--><p>m</p><!--/fu:p-->");
+    assertEquals(html.includes("fu-marker"), false);
+    assertEquals(html.includes(MARKER_TOKEN), false);
+  } finally {
+    console.warn = origWarn;
+    __resetWarningsForTest();
+  }
+});
+
+Deno.test("the navigation protocol constants are the wire values", () => {
+  assertEquals(
+    [PARTIAL_PARAM, BUILD_PARAM, BUILD_RELOAD_HEADER, NAV_ATTR, BUILD_ATTR],
+    ["fu-partial", "__b", "x-fu-reload", "data-fu-nav", "data-fu-build"],
+  );
+});
+
+Deno.test("a Partial name that is not a plain token fails the render", async () => {
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({ default: () => h(Partial, { name: "x--><b>" }, "y") }),
+    },
+    assets,
+  });
+  const origError = console.error;
+  console.error = () => {};
+  try {
+    assertEquals((await get(handler, "/")).status, 500);
+  } finally {
+    console.error = origError;
+  }
+});
+
+Deno.test("a Partial name is lower-case words joined by single hyphens", () => {
+  for (const name of ["a", "content", "head-dynamic", "a1-2b", "x-y-z"]) {
+    assertEquals(typeof Partial({ name }), "object", name);
+  }
+  for (const name of ["", "a-", "a--b", "-a", "A", "9a", "a_b", "a b", "a-B", "content "]) {
+    assertThrows(() => Partial({ name }), Error, "must match", name);
+  }
+});
+
+Deno.test("raw HTML is trusted: a region comment in it is served as written; a forged marker element is inert", async () => {
+  const page = (html: string) =>
+    createHandler({
+      manifest: {
+        "/routes/index.tsx": () =>
+          Promise.resolve({
+            default: () => h("div", { dangerouslySetInnerHTML: { __html: html } }),
+          }),
+      },
+      assets,
+    });
+  // Not refused on the server: stored content must not become a lasting 500.
+  // The client falls back to a full load when the regions it finds are unsound.
+  for (const raw of ["<!--fu:p:content-->x<!--/fu:p-->", "<!--/fu:p-->"]) {
+    const res = await get(page(raw), "/");
+    assertEquals(res.status, 200, raw);
+    assertStringIncludes(await res.text(), `<div>${raw}</div>`);
+  }
+  const forged =
+    '<fu-marker data-fu="p" data-k="0000000000000000" data-name="content"></fu-marker>';
+  const res = await get(page(forged), "/");
+  assertEquals(res.status, 200);
+  const html = await res.text();
+  assertStringIncludes(html, forged);
+  assertEquals(html.includes("<!--fu:p:"), false);
+});
+
+Deno.test("ctx.partial is true only for the partial-navigation query parameter", async () => {
+  const seen: boolean[] = [];
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({
+          handlers: {
+            GET: (ctx: Ctx) => {
+              seen.push(ctx.partial);
+              return null;
+            },
+          },
+          default: () => h("p", null),
+        }),
+    },
+    assets,
+  });
+  await get(handler, "/");
+  await get(handler, `/?${PARTIAL_PARAM}=1`);
+  await get(handler, `/?${PARTIAL_PARAM}=true`);
+  assertEquals(seen, [false, true, false]);
+});
+
+Deno.test("ctx.partial is readable inside a middleware, at any depth", async () => {
+  // A build guard is middleware. Each level sees ctx through a forwarding
+  // view, so a field missing from that view reads as undefined there.
+  const seen: unknown[] = [];
+  const app = new App()
+    .use((ctx) => (seen.push(ctx.partial), ctx.next()))
+    .use((ctx) => (seen.push(ctx.partial), ctx.next()));
+  const handler = createHandler({
+    manifest: { "/routes/index.tsx": () => Promise.resolve({ default: () => h("p", null) }) },
+    assets,
+    app,
+  });
+  await get(handler, `/?${PARTIAL_PARAM}=1`);
+  await get(handler, "/");
+  assertEquals(seen, [true, true, false, false]);
+});
+
+Deno.test("ctx.rawParams reaches a handler, a page, and a middleware on the way out", async () => {
+  const seen: unknown[] = [];
+  const app = new App().use(async (ctx) => {
+    seen.push(ctx.rawParams);
+    const res = await ctx.next();
+    seen.push(ctx.rawParams);
+    return res;
+  });
+  const handler = createHandler({
+    manifest: {
+      "/routes/s/[code].tsx": () =>
+        Promise.resolve({
+          handlers: { GET: (ctx: Ctx) => ctx.rawParams.code },
+          default: (ctx: Ctx) =>
+            h("p", { "data-p": ctx.params.code, "data-r": ctx.rawParams.code, "data-h": ctx.data }),
+        }),
+    },
+    assets,
+    app,
+  });
+  const res = await get(handler, "/s/a%20b%2Fc");
+  assertEquals(res.status, 200);
+  // Decoded, except the slash: decoding never makes a separator.
+  assertStringIncludes(
+    await res.text(),
+    '<p data-p="a b%2Fc" data-r="a%20b%2Fc" data-h="a%20b%2Fc"></p>',
+  );
+  // Like params: empty until routing has run.
+  assertEquals(seen, [{}, { code: "a%20b%2Fc" }]);
+
+  // A malformed escape is the app's to answer, with the text as written.
+  const bad = await get(handler, "/s/%E0%A4%A");
+  assertEquals(bad.status, 200);
+  assertStringIncludes(await bad.text(), '<p data-p="%E0%A4%A" data-r="%E0%A4%A"');
+});
+
+Deno.test("a request's dot segments, empty segments and trailing slash route as they did in 0.5.2", async () => {
+  // Passed before the matcher was rewritten. The URL of a Request has its dot
+  // segments resolved, encoded or not, before fu reads it.
+  const page = (name: string) => () =>
+    Promise.resolve({ default: (ctx: Ctx) => h("p", null, `${name}:${ctx.params.x ?? ""}`) });
+  const handler = createHandler({
+    manifest: {
+      "/routes/about.tsx": page("about"),
+      "/routes/blog/[x].tsx": page("blog"),
+      "/routes/files/[...x].tsx": page("files"),
+    },
+    assets,
+  });
+  const got: Record<string, string> = {};
+  for (
+    const path of [
+      "//",
+      "/about/",
+      "//about",
+      "/blog/a/",
+      "/blog//a",
+      "/files/",
+      "/files/a//b",
+      "/x/../about",
+      "/x/%2e%2e/about",
+      "/blog/./a",
+      "/files/a/../b",
+      "/files/a/%2E%2e/b",
+      "/files/a/./b",
+      "/files/..",
+    ]
+  ) {
+    const res = await get(handler, path);
+    const html = await res.text();
+    got[path] = res.status === 200 ? html.match(/<p>([^<]*)<\/p>/)![1] : String(res.status);
+  }
+  assertEquals(got, {
+    "//": "404",
+    "/about/": "404",
+    "//about": "404",
+    "/blog/a/": "404",
+    "/blog//a": "404",
+    "/files/": "404",
+    "/files/a//b": "404",
+    "/x/../about": "about:",
+    "/x/%2e%2e/about": "about:",
+    "/blog/./a": "blog:a",
+    "/files/a/../b": "files:b",
+    "/files/a/%2E%2e/b": "files:b",
+    "/files/a/./b": "files:a/b",
+    "/files/..": "404",
+  });
+});
+
+Deno.test("what the runtime passes reaches every middleware and the page as env, waitUntil and assets", async () => {
+  const waited: Promise<unknown>[] = [];
+  const store = { fetch: () => Promise.resolve(new Response("file")) };
+  const seen: unknown[] = [];
+  const app = new App();
+  app.use((ctx) => {
+    seen.push(ctx.env.KEY, ctx.assets);
+    ctx.waitUntil(Promise.resolve("outer"));
+    return ctx.next();
+  });
+  app.use((ctx) => {
+    seen.push(ctx.env.KEY, ctx.assets);
+    return ctx.next();
+  });
+  const manifest: RouteManifest = {
+    "/routes/index.tsx": () =>
+      Promise.resolve({
+        default: (ctx: Ctx) => {
+          ctx.waitUntil(Promise.resolve("page"));
+          return h("p", null, String(ctx.env.KEY));
+        },
+      }),
+  };
+  const handler = createHandler({ manifest, assets, app });
+  const res = await handler(new Request("http://x/"), {
+    env: { KEY: "value" },
+    waitUntil: (p) => waited.push(p),
+    assets: store,
+  });
+  assertStringIncludes(await res.text(), "<p>value</p>");
+  assertEquals(seen, ["value", store, "value", store]);
+  assertEquals(await Promise.all(waited), ["outer", "page"]);
+});
+
+Deno.test("without a runtime extra, env is empty, waitUntil does nothing and there is no asset store", async () => {
+  let seen: [unknown, unknown] | undefined;
+  const app = new App();
+  app.use((ctx) => {
+    seen = [ctx.env, ctx.assets];
+    ctx.waitUntil(Promise.reject(new Error("dropped, and not unhandled")).catch(() => {}));
+    return ctx.next();
+  });
+  const handler = createHandler({ manifest: {}, assets, app });
+  assertEquals((await get(handler, "/")).status, 404);
+  assertEquals(seen, [{}, null]);
 });
