@@ -1,8 +1,8 @@
 // Static files from a directory: as an asset store (`assetsFromDir`), what
 // serve.mjs and fu dev hand the app where celld has its assets binding, and as
 // middleware (`staticFiles`). Node-only: the Worker never imports this file.
-import { constants, type Stats, statSync } from "node:fs";
-import { access, type FileHandle, open, stat } from "node:fs/promises";
+import { type Stats, statSync } from "node:fs";
+import { type FileHandle, open, stat } from "node:fs/promises";
 import * as path from "node:path";
 import type { AssetStore, Middleware } from "./types.ts";
 
@@ -235,7 +235,9 @@ function dirFiles(dir: string, etag: DirStoreOptions["etag"], label: string): Di
         // A file that cannot be read is not served: found out now, while the
         // request can still fall through, not when the body is pulled.
         // HEAD too, or it would promise a file that GET then does not send.
-        if (st.isFile()) await access(file, constants.R_OK);
+        // By opening it: Deno's `access` asks for the uid, which a run
+        // without --allow-sys refuses, uncaught, and the process dies.
+        if (st.isFile()) await (await open(file, "r")).close();
       } catch {
         return null;
       }

@@ -2,7 +2,22 @@
 
 Releases before 0.5.3 are described by their commits (`git log`).
 
-## 0.6.0 (unreleased)
+## 0.6.1
+
+The first published 0.6. Fixes a crash in the runner that 0.6.0, tagged but
+never published to npm, shipped with.
+
+- **The runner no longer dies on the first client file under Deno without
+  `--allow-sys`.** `assetsFromDir` checked a file was readable with
+  `node:fs` `access`, which on Deno asks for the uid; refused, it threw
+  outside any handler and ended the process. fu-todo's image runs Deno with
+  `--allow-net --allow-read --allow-write=/data --allow-env`, so a container
+  served its first page and went down on the first script. The check now
+  opens and closes the file, which needs read access only. A test runs
+  `assetsFromDir` in a Deno process with exactly those permissions, and
+  `check:pkg` serves the app that way instead of with `-A`.
+
+## 0.6.0 (tagged, not published to npm)
 
 celld is the primary runtime. `fu build` writes one Worker module, which celld
 runs as it is, and a runner that serves the same module on Node, Deno and Bun.

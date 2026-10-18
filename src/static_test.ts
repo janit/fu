@@ -596,3 +596,29 @@ Deno.test("a file that cannot be read is a miss for HEAD as it is for GET", asyn
     await Deno.remove(file);
   }
 });
+
+Deno.test("a file is served by a Deno run with only net, read and env: no sys permission", async () => {
+  // fu-todo's image runs serve.mjs this way; node:fs `access` asked for the
+  // uid, and the first client file took the whole server down.
+  const script = `
+    import { assetsFromDir } from ${JSON.stringify(new URL("./static.ts", import.meta.url).href)};
+    const res = await assetsFromDir(${
+    JSON.stringify(dir)
+  }).fetch(new Request("http://x/hello.txt"));
+    console.log(res.status, await res.text());
+  `;
+  // `deno eval` grants everything, so the script is a file and `deno run` it.
+  const file = `${base}/no-sys.ts`;
+  await Deno.writeTextFile(file, script);
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "--no-prompt", "--allow-read", "--allow-env", "--allow-net", file],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const text = new TextDecoder();
+  assertEquals(
+    [out.code, text.decode(out.stdout).trim()],
+    [0, "200 hello"],
+    text.decode(out.stderr),
+  );
+});

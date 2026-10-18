@@ -1,6 +1,6 @@
 {
   "name": "@janit/fu",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "A minimal islands framework on Preact 11 and rolldown. Builds a Worker for celld; runs on Deno, Node and Bun.",
   "license": "MIT",
