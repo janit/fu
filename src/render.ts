@@ -73,13 +73,13 @@ function installIslandHook(): void {
           const scope = useContext(Scope);
           if (scope === INSIDE) return h(Inner, props as never);
           scope?.add(file);
+          const json = serializeProps(key, props);
+          // Rendered with the props as the client will parse them, so a Date,
+          // NaN or Map is the same value on both sides and hydration matches.
           return h(
             Scope.Provider,
             { value: INSIDE },
-            h("div", {
-              "data-island": key,
-              "data-props": serializeProps(key, props),
-            }, h(Inner, props as never)),
+            h("div", { "data-island": key, "data-props": json }, h(Inner, JSON.parse(json))),
           );
         }) as ComponentType<never>;
         wrapped.set(type, w);
@@ -159,7 +159,10 @@ function guard(type: ComponentType<never>, what: string): ComponentType<never> {
     } else {
       const fn = type as unknown as (this: unknown, props: unknown, context: unknown) => unknown;
       g = function (this: unknown, props: unknown, context: unknown): unknown {
-        return checked(fn.call(this, props, context));
+        // The props `top` handed over, not Preact's copy of them: a field the
+        // component reassigns on ctx must land on ctx, as in an async one.
+        const own = (props as { [TOP_PROPS]?: unknown })[TOP_PROPS];
+        return checked(fn.call(this, own ?? props, context));
       } as unknown as ComponentType<never>;
       if (t.contextType) (g as { contextType?: unknown }).contextType = t.contextType;
     }
@@ -194,8 +197,12 @@ function top(
     }
     return (type as unknown as (props: unknown) => Promise<ComponentChildren>)(props);
   }
-  return h(guard(type, what), props as never);
+  // A class gets Preact's copy: it reads `this.props`, which Preact assigns.
+  return h(guard(type, what), (isClass(type) ? props : { [TOP_PROPS]: props }) as never);
 }
+
+/** Where `top` passes a function component its props by reference. */
+const TOP_PROPS = "__fuTopProps";
 
 /** The same component without the stamp. A class has to stay one: it cannot be called. */
 function unstamped(type: ComponentType<never>): ComponentType<never> {
@@ -328,12 +335,11 @@ export function scriptsMarker(): string {
 }
 
 /** Every token-bearing marker element, of either kind. A fresh regex: it is global. */
-function strayMarkers(): RegExp {
-  return new RegExp(
-    `<fu-marker data-fu="(?:head|scripts)" data-k="${MARKER_TOKEN}"></fu-marker>`,
-    "g",
-  );
-}
+/** Built once; used only by `replace`, which resets its lastIndex itself. */
+const STRAY_MARKERS = new RegExp(
+  `<fu-marker data-fu="(?:head|scripts)" data-k="${MARKER_TOKEN}"></fu-marker>`,
+  "g",
+);
 
 /**
  * Replace the one marker, or fail: two means the shell placed the component
@@ -879,13 +885,12 @@ export function document(
   }
   // Not an owned document: a marker here has nothing to mean. Drop it so the
   // token never reaches a client.
-  const stray = strayMarkers();
-  if (stray.test(body)) {
+  if (body.includes(headMarker()) || body.includes(scriptsMarker())) {
     warnOnce(
       "stray",
       "[fu] <FuHead/> or <FuScripts/> outside a document-owning shell is ignored",
     );
-    body = body.replace(stray, "");
+    body = body.replace(STRAY_MARKERS, "");
   }
   const parts = '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +

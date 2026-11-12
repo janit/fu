@@ -5,6 +5,7 @@ import {
   interceptTarget,
   isExecutableScript,
   matchRegions,
+  missingPreloads,
   type NavResponse,
   type NodeLike,
   partialUrl,
@@ -698,4 +699,20 @@ Deno.test("only a direct, successful HTML answer without a reload directive is s
     refusal(response({ ok: false, status: 409, headers: { "x-fu-reload": "1" } })),
     "the server asked for a full load",
   );
+});
+
+Deno.test("a navigation announces the next page's preloads this one lacks, each once", () => {
+  assertEquals(
+    missingPreloads(
+      ["http://x/_fu/boot-1.js", "http://x/_fu/A-2.js"],
+      [
+        "http://x/_fu/boot-1.js",
+        "http://x/_fu/B-3.js",
+        "http://x/_fu/shared-4.js",
+        "http://x/_fu/B-3.js",
+      ],
+    ),
+    ["http://x/_fu/B-3.js", "http://x/_fu/shared-4.js"],
+  );
+  assertEquals(missingPreloads(["http://x/a.js"], []), []);
 });

@@ -30,7 +30,9 @@ export function clearOutput(outDir: string, ours: boolean): void {
     fs.rmSync(outDir, { recursive: true, force: true });
     return;
   }
-  for (const sub of ["public" + ASSETS, "server"]) {
+  // server/ by file, not whole: `--out .` would otherwise take the app's own
+  // server/ with it.
+  for (const sub of ["public" + ASSETS, "server/index.mjs", "server/serve.mjs"]) {
     fs.rmSync(path.join(outDir, sub), { recursive: true, force: true });
   }
 }

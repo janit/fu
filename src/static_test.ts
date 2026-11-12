@@ -298,21 +298,35 @@ Deno.test("cancelling a body closes its handle, mid-file and before the first ch
 });
 
 Deno.test("a file replaced between the stat and the first read errors the body instead of sending a short one", async () => {
+  // Streamed, so bigger than one chunk: a small file is read whole up front.
+  const file = `${dir}/swap.bin`;
+  await Deno.writeFile(file, big);
+  const mw = staticFiles({ dir });
+  const res = await mw(ctxFor("/swap.bin"));
+  assertEquals(res.headers.get("content-length"), "300000");
+  await Deno.writeTextFile(file, "short");
+  // Not "short" under a content-length of 300000.
+  await assertRejects(() => res.arrayBuffer(), Error, "changed");
+  assertEquals(__openHandlesForTest(), 0);
+
+  // Deleted: the same, with the reason the filesystem gives.
+  await Deno.writeFile(file, big);
+  const gone = await mw(ctxFor("/swap.bin"));
+  await Deno.remove(file);
+  await assertRejects(() => gone.arrayBuffer());
+  assertEquals(__openHandlesForTest(), 0);
+});
+
+Deno.test("a small file is read whole when it is answered: a later replace cannot shorten it", async () => {
   const file = `${dir}/swap.txt`;
   await Deno.writeTextFile(file, "a long first version of the file");
   const mw = staticFiles({ dir });
   const res = await mw(ctxFor("/swap.txt"));
   assertEquals(res.headers.get("content-length"), "32");
   await Deno.writeTextFile(file, "short");
-  // Not "short" under a content-length of 32.
-  await assertRejects(() => res.text(), Error, "changed");
+  assertEquals(await res.text(), "a long first version of the file");
   assertEquals(__openHandlesForTest(), 0);
-
-  // Deleted: the same, with the reason the filesystem gives.
-  const gone = await mw(ctxFor("/swap.txt"));
   await Deno.remove(file);
-  await assertRejects(() => gone.text());
-  assertEquals(__openHandlesForTest(), 0);
 });
 
 Deno.test("If-None-Match accepts *, lists and weak comparison; it beats If-Modified-Since", async () => {

@@ -17,12 +17,27 @@ export async function listening(
   try {
     await server.ready();
   } catch (err) {
-    throw new Error(
-      `${what} could not listen on ${hostname}:${port} (${
-        err instanceof Error ? err.message : err
-      })`,
-    );
+    throw listenFailure(what, hostname, port, err);
   }
+}
+
+/**
+ * Build a server, failing the way `listening` does. Deno binds as the server
+ * is built, so a taken port throws here, before `ready()`, as a bare "Address
+ * already in use" that names neither the server nor the port.
+ */
+export function started<S>(start: () => S, what: string, hostname: string, port: number): S {
+  try {
+    return start();
+  } catch (err) {
+    throw listenFailure(what, hostname, port, err);
+  }
+}
+
+function listenFailure(what: string, hostname: string, port: number, err: unknown): Error {
+  return new Error(
+    `${what} could not listen on ${hostname}:${port} (${err instanceof Error ? err.message : err})`,
+  );
 }
 
 /**
@@ -60,4 +75,47 @@ export function exitOnSignal(
   };
   proc.on("SIGINT", stop);
   proc.on("SIGTERM", stop);
+}
+
+/** The `ctx` a Workers runtime passes beside `env`, as far as fu's Worker uses it. */
+export interface WorkerContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
+/**
+ * `waitUntil` as a Workers runtime has it: the work runs on after the
+ * response, a failure is reported rather than left an unhandled rejection
+ * (which ends a Node process), and stopping the server waits for what is
+ * still running, within the signal's grace period.
+ */
+export function workerContext(): { context: WorkerContext; settled(): Promise<void> } {
+  const pending = new Set<Promise<unknown>>();
+  const context: WorkerContext = {
+    waitUntil(promise) {
+      const p = Promise.resolve(promise)
+        .catch((err) => console.error("[fu] waitUntil:", err))
+        .finally(() => pending.delete(p));
+      pending.add(p);
+    },
+    passThroughOnException() {},
+  };
+  // Until none is left: work that is waited for may itself call waitUntil.
+  const settled = async (): Promise<void> => {
+    while (pending.size) await Promise.all(pending);
+  };
+  return { context, settled };
+}
+
+/**
+ * The answer when the Worker itself fails: not the app's error page (that is
+ * the app's own), but the Worker not starting, a `prepare` that threw, which
+ * the next request tries again. Logged, and never cached.
+ */
+export function workerFailed(err: unknown): Response {
+  console.error("[fu] the worker failed:", err);
+  return new Response("Internal Server Error", {
+    status: 500,
+    headers: { "cache-control": "no-store", "content-type": "text/plain; charset=utf-8" },
+  });
 }

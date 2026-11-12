@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   bootModule,
+  clientFileUrls,
   mergeSheets,
   optional,
   scanProject,
@@ -213,6 +214,19 @@ Deno.test("worker.ts: prepare is called, every other runtime export is carried, 
   assertEquals(workerExports("worker.ts", "export const prepare = (env) => {};").prepare, true);
 });
 
+Deno.test("worker.ts: a prepare that may be a function is left to the runtime check", () => {
+  for (
+    const src of [
+      "const setup = () => {}; export const prepare = setup;",
+      "declare function wrap(f: unknown): () => void; export const prepare = wrap(() => {});",
+      "type P = () => void; export const prepare = (async () => {}) satisfies P;",
+      "export const prepare = cond ? a : b;",
+    ]
+  ) {
+    assertEquals(workerExports("worker.ts", src).prepare, true, src);
+  }
+});
+
 Deno.test("worker.ts: what celld or the Worker cannot take is refused at build time", () => {
   for (
     const [src, why] of [
@@ -221,6 +235,10 @@ Deno.test("worker.ts: what celld or the Worker cannot take is refused at build t
       ['export * from "./x.ts";', "export *"],
       ["export const { a, b } = {};", "destructured"],
       ["export const prepare = 42;", "must be a function"],
+      ['export const prepare = "x";', "must be a function"],
+      ["export const prepare = {};", "must be a function"],
+      ["export const prepare = [];", "must be a function"],
+      ["export const prepare = class {};", "must be a function"],
       ["export class prepare {}", "must be a function"],
       ['const x = 1; export { x as "a-b" };', "not a JavaScript name"],
     ]
@@ -232,15 +250,16 @@ Deno.test("worker.ts: what celld or the Worker cannot take is refused at build t
 /** Write a generated Worker and a stand-in server module, and import the Worker. */
 async function loadWorker(
   prepareSrc: string | null,
+  ssrSrc?: string,
 ): Promise<{ fetch(r: Request, env?: unknown, ctx?: unknown): Promise<Response> }> {
   const dir = await Deno.makeTempDir({ dir: tmp });
   await Deno.writeTextFile(
     `${dir}/ssr.ts`,
-    `globalThis.__fuSsrRuns = (globalThis.__fuSsrRuns ?? 0) + 1;\n` +
-      `export default (req, extra) => Promise.resolve(new Response(JSON.stringify({\n` +
-      `  path: new URL(req.url).pathname, env: extra.env, assets: extra.assets,\n` +
-      `  prepared: globalThis.__fuPrepared ?? null, waits: typeof extra.waitUntil,\n` +
-      `})));\n`,
+    ssrSrc ?? `globalThis.__fuSsrRuns = (globalThis.__fuSsrRuns ?? 0) + 1;\n` +
+        `export default (req, extra) => Promise.resolve(new Response(JSON.stringify({\n` +
+        `  path: new URL(req.url).pathname, env: extra.env, assets: extra.assets,\n` +
+        `  prepared: globalThis.__fuPrepared ?? null, waits: typeof extra.waitUntil,\n` +
+        `})));\n`,
   );
   let workerPath: string | null = null;
   if (prepareSrc !== null) {
@@ -296,8 +315,42 @@ Deno.test("a prepare that fails is tried again on the next request", async () =>
   assertEquals(g.__fuPrepareCalls, 2);
 });
 
+Deno.test("a route that throws at module scope fails every request, and prepare is not re-run", async () => {
+  g.__fuPrepareCalls = 0;
+  const worker = await loadWorker(
+    `export function prepare() { globalThis.__fuPrepareCalls++; }\n`,
+    `throw new Error("broken at module scope");\nexport default () => new Response("never");\n`,
+  );
+  for (let i = 0; i < 3; i++) {
+    await assertRejects(
+      () => worker.fetch(new Request("http://x/"), {}),
+      Error,
+      "broken at module scope",
+    );
+  }
+  assertEquals(g.__fuPrepareCalls, 1);
+});
+
 Deno.test("without worker.ts, or a runtime's ctx and ASSETS, the Worker still answers", async () => {
   const worker = await loadWorker(null);
   const body = await (await worker.fetch(new Request("http://x/p"))).json();
   assertEquals([body.path, body.env, body.assets, body.waits], ["/p", {}, null, "undefined"]);
+});
+
+Deno.test("client file URLs are spelled as a request's pathname spells them", async () => {
+  // rolldown names a chunk after its island as written; the browser asks for
+  // the percent-encoded path, which a raw name never matched: a 404.
+  const dir = await Deno.makeTempDir({ dir: tmp });
+  await Deno.mkdir(`${dir}/sub`);
+  for (const f of ["Zähler Neu-ab12.js", "plain-cd34.js", "sub/x-ef56.css", "a@b+c-0.js"]) {
+    await Deno.writeTextFile(`${dir}/${f}`, "");
+  }
+  const urls = clientFileUrls(dir, "/_fu/");
+  assertEquals(urls, [
+    "/_fu/Z%C3%A4hler%20Neu-ab12.js",
+    "/_fu/a@b+c-0.js",
+    "/_fu/plain-cd34.js",
+    "/_fu/sub/x-ef56.css",
+  ]);
+  assertEquals(urls.includes(new URL("http://x/_fu/Zähler Neu-ab12.js").pathname), true);
 });

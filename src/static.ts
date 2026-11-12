@@ -2,7 +2,7 @@
 // serve.mjs and fu dev hand the app where celld has its assets binding, and as
 // middleware (`staticFiles`). Node-only: the Worker never imports this file.
 import { type Stats, statSync } from "node:fs";
-import { type FileHandle, open, stat } from "node:fs/promises";
+import { type FileHandle, open } from "node:fs/promises";
 import * as path from "node:path";
 import type { AssetStore, Middleware } from "./types.ts";
 
@@ -229,58 +229,88 @@ function dirFiles(dir: string, etag: DirStoreOptions["etag"], label: string): Di
       const file = path.join(root, ...segments);
       if (!isUnder(root, file)) return null;
 
+      // A file that cannot be read is not served: found out now, while the
+      // request can still fall through, not when the body is pulled. HEAD
+      // too, or it would promise a file that GET then does not send. By
+      // opening it: Deno's `access` asks for the uid, which a run without
+      // --allow-sys refuses, uncaught, and the process dies. The same handle
+      // gives the stat, and reads a file of one chunk or less whole (most
+      // client chunks), so those cost one open and not two.
+      let handle: FileHandle | null = null;
       let st: Stats;
       try {
-        st = await stat(file);
-        // A file that cannot be read is not served: found out now, while the
-        // request can still fall through, not when the body is pulled.
-        // HEAD too, or it would promise a file that GET then does not send.
-        // By opening it: Deno's `access` asks for the uid, which a run
-        // without --allow-sys refuses, uncaught, and the process dies.
-        if (st.isFile()) await (await open(file, "r")).close();
+        handle = await open(file, "r");
+        st = await handle.stat();
+        if (!st.isFile()) throw new Error("not a file");
       } catch {
+        await handle?.close().catch(() => {});
         return null;
       }
-      if (!st.isFile()) return null;
-
-      const mtimeMs = Math.floor(st.mtimeMs);
-      let own: string | null | undefined;
+      const h = handle;
       try {
-        own = etag?.("/" + segments.join("/"), { size: st.size, mtimeMs: st.mtimeMs });
-        if (own != null && !ENTITY_TAG.test(own)) {
-          throw new Error(`${JSON.stringify(own)} is not an entity-tag such as "abc" or W/"abc"`);
+        const mtimeMs = Math.floor(st.mtimeMs);
+        let own: string | null | undefined;
+        try {
+          own = etag?.("/" + segments.join("/"), { size: st.size, mtimeMs: st.mtimeMs });
+          if (own != null && !ENTITY_TAG.test(own)) {
+            throw new Error(`${JSON.stringify(own)} is not an entity-tag such as "abc" or W/"abc"`);
+          }
+        } catch (err) {
+          own = null;
+          if (!warnedEtag) {
+            warnedEtag = true;
+            console.error(`[fu] ${label} etag: using the built-in tag instead`, err);
+          }
         }
-      } catch (err) {
-        own = null;
-        if (!warnedEtag) {
-          warnedEtag = true;
-          console.error(`[fu] ${label} etag: using the built-in tag instead`, err);
+        const tag = own ?? `W/"${st.size}-${mtimeMs}"`;
+        const headers = new Headers({
+          "content-type": contentType(file),
+          etag: tag,
+          "last-modified": new Date(mtimeMs).toUTCString(),
+          "accept-ranges": "none",
+          "x-content-type-options": "nosniff",
+        });
+        const inm = req.headers.get("if-none-match");
+        const ims = req.headers.get("if-modified-since");
+        let fresh: boolean;
+        if (inm !== null) fresh = etagMatches(inm, tag);
+        else {
+          // Only a value that round-trips as an HTTP date counts. HTTP dates
+          // have second precision; compare on whole seconds.
+          const t = ims !== null ? Date.parse(ims) : NaN;
+          fresh = ims !== null && new Date(t).toUTCString() === ims &&
+            t >= Math.floor(mtimeMs / 1000) * 1000;
         }
+        if (fresh) return { res: new Response(null, { status: 304, headers }), segments };
+        headers.set("content-length", String(st.size));
+        if (method !== "GET" || st.size === 0) {
+          return { res: new Response(null, { status: 200, headers }), segments };
+        }
+        if (st.size <= CHUNK) {
+          const buf = new Uint8Array(st.size);
+          let got = 0;
+          while (got < st.size) {
+            const { bytesRead } = await h.read(buf, got, st.size - got, got);
+            if (bytesRead === 0) break;
+            got += bytesRead;
+          }
+          // Truncated between the stat and the read: not served, as a file
+          // that could not be read is not.
+          if (got !== st.size) return null;
+          return { res: new Response(buf, { status: 200, headers }), segments };
+        }
+        // A larger file is not held open for a body that may never be read:
+        // the body opens it again when it is first pulled.
+        return {
+          res: new Response(fileBody(file, st.size, mtimeMs), { status: 200, headers }),
+          segments,
+        };
+      } catch {
+        // A read that failed after the open: as unreadable as a failed open.
+        return null;
+      } finally {
+        await h.close().catch(() => {});
       }
-      const tag = own ?? `W/"${st.size}-${mtimeMs}"`;
-      const headers = new Headers({
-        "content-type": contentType(file),
-        etag: tag,
-        "last-modified": new Date(mtimeMs).toUTCString(),
-        "accept-ranges": "none",
-        "x-content-type-options": "nosniff",
-      });
-      const inm = req.headers.get("if-none-match");
-      const ims = req.headers.get("if-modified-since");
-      let fresh: boolean;
-      if (inm !== null) fresh = etagMatches(inm, tag);
-      else {
-        // Only a value that round-trips as an HTTP date counts. HTTP dates
-        // have second precision; compare on whole seconds.
-        const t = ims !== null ? Date.parse(ims) : NaN;
-        fresh = ims !== null && new Date(t).toUTCString() === ims &&
-          t >= Math.floor(mtimeMs / 1000) * 1000;
-      }
-      if (fresh) return { res: new Response(null, { status: 304, headers }), segments };
-      headers.set("content-length", String(st.size));
-      // Nothing is opened here: the body opens the file when it is first read.
-      const body = method === "GET" && st.size > 0 ? fileBody(file, st.size, mtimeMs) : null;
-      return { res: new Response(body, { status: 200, headers }), segments };
     },
   };
 }

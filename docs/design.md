@@ -1,6 +1,6 @@
 # Fresh Urquell — design
 
-**Date:** 2026-09-09 (design), kept up to date since; last revised 2026-10-15
+**Date:** 2026-09-09 (design), kept up to date since; last revised 2026-11-11
 **Status:** implemented and verified; a living document
 **Package:** `@janit/fu` (repo `janit/fu`)
 
@@ -275,6 +275,9 @@ interface Ctx<S> {
   next(): Promise<Response>;
 }
 ```
+
+(Abridged: the full `Ctx` in `src/types.ts` has since grown `rawParams`,
+`response`, `partial`, `env`, `waitUntil` and `assets`.)
 
 One `ctx` is shared by the whole chain: each level is a thin view whose fields
 read and write the root, so what the router writes (`params`, `data`, `error`)
@@ -569,7 +572,8 @@ The HMR claims are checked in a real browser, not inferred: headless Chromium
 (Playwright) loads the prod build and clicks all three islands, then loads the
 dev server, clicks the counter twice, edits the island source and sees the new
 markup with the count intact, then edits the CSS and sees the computed style
-change without a navigation. That harness lives outside the repo for now.
+change without a navigation. That harness is `scripts/check-browser.mjs` (`deno task check:browser`),
+which stays in the private repo.
 
 Not yet built: sourcemaps in dev, an error overlay, prerendering, per-route CSS
 splitting.

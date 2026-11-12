@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { serveWorker, type WorkerModule } from "./serve.ts";
+import { envPort, serveWorker, type WorkerModule } from "./serve.ts";
 
 const dir = await Deno.makeTempDir();
 await Deno.writeTextFile(`${dir}/hello.txt`, "hello");
@@ -69,8 +69,8 @@ Deno.test("waitUntil lets the work run, and a failure in it is logged, not fatal
   };
   try {
     await withServer(worker, async (base) => {
+      // close() waits for waitUntil work, so no sleep is needed.
       assertEquals(await (await fetch(base + "/")).text(), "sent first");
-      await new Promise((r) => setTimeout(r, 30));
     });
   } finally {
     console.error = error;
@@ -168,4 +168,111 @@ Deno.test("close waits for waitUntil work in flight, as a Workers runtime lets i
   assertEquals(await (await fetch(served.url)).text(), "sent first");
   await served.close();
   assertEquals(done, true);
+});
+
+Deno.test("envPort reads digits only, and no PORT is 3000", () => {
+  assertEquals(envPort(undefined), 3000);
+  assertEquals(envPort(""), 3000);
+  assertEquals(envPort("0080"), 80);
+  assertEquals(envPort("65535"), 65535);
+});
+
+Deno.test("a valid PORT is the port served on, and the url reports it", async () => {
+  const port = freePort();
+  Deno.env.set("PORT", String(port));
+  try {
+    const served = await serveWorker({ fetch: () => new Response("on PORT") }, {
+      hostname: "127.0.0.1",
+      exitOnSignal: false,
+    });
+    try {
+      assertStringIncludes(served.url, `:${port}`);
+      assertEquals(await (await fetch(`http://127.0.0.1:${port}/`)).text(), "on PORT");
+    } finally {
+      await served.close();
+    }
+  } finally {
+    Deno.env.delete("PORT");
+  }
+});
+
+Deno.test("serveWorker rejects naming the host and port when the port is already bound", async () => {
+  const held = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const port = (held.addr as Deno.NetAddr).port;
+  try {
+    await assertRejects(
+      () =>
+        serveWorker({ fetch: () => new Response("") }, {
+          port,
+          hostname: "127.0.0.1",
+          exitOnSignal: false,
+        }),
+      Error,
+      `could not listen on 127.0.0.1:${port}`,
+    );
+  } finally {
+    held.close();
+  }
+});
+
+Deno.test("the runner exits 0 on SIGTERM, finishing waitUntil work and releasing its port", async () => {
+  const port = freePort();
+  const marker = `${dir}/sigterm-done`;
+  const script = `${dir}/sigterm-runner.ts`;
+  await Deno.writeTextFile(
+    script,
+    `import { serveWorker } from ${JSON.stringify(new URL("./serve.ts", import.meta.url).href)};
+await serveWorker({
+  fetch(_req, _env, ctx) {
+    ctx.waitUntil(new Promise((r) => setTimeout(r, 300)).then(() =>
+      Deno.writeTextFile(${JSON.stringify(marker)}, "done")
+    ));
+    return new Response("sent first");
+  },
+}, { port: ${port}, hostname: "127.0.0.1" });
+console.log("ready");
+`,
+  );
+  const child = new Deno.Command(Deno.execPath(), {
+    // From the repo, so the script outside it resolves serve.ts's dependencies.
+    args: ["run", "-A", "--config", new URL("../deno.json", import.meta.url).pathname, script],
+    stdout: "piped",
+    stderr: "inherit",
+  }).spawn();
+  const reader = child.stdout.pipeThrough(new TextDecoderStream()).getReader();
+  let out = "";
+  while (!out.includes("ready")) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    out += value;
+  }
+  await reader.cancel();
+  assertEquals(await (await fetch(`http://127.0.0.1:${port}/`)).text(), "sent first");
+  child.kill("SIGTERM");
+  const status = await child.status;
+  assertEquals(status.code, 0);
+  assertEquals(await Deno.readTextFile(marker), "done");
+  await assertRejects(() => fetch(`http://127.0.0.1:${port}/`));
+});
+
+Deno.test("close also waits for waitUntil work that waitUntil work starts", async () => {
+  let inner = false;
+  const worker: WorkerModule = {
+    fetch(_req, _env, ctx) {
+      ctx.waitUntil(
+        new Promise((r) => setTimeout(r, 20)).then(() =>
+          ctx.waitUntil(new Promise((r) => setTimeout(r, 50)).then(() => inner = true))
+        ),
+      );
+      return new Response("sent first");
+    },
+  };
+  const served = await serveWorker(worker, {
+    port: freePort(),
+    hostname: "127.0.0.1",
+    exitOnSignal: false,
+  });
+  assertEquals(await (await fetch(served.url)).text(), "sent first");
+  await served.close();
+  assertEquals(inner, true);
 });

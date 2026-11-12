@@ -71,7 +71,7 @@ deno task build    # example app, production build
 
 
 deno task test     # unit tests, no browser
-deno task check    # format, lint, types (framework and both apps), tests
+deno task check    # format, lint, types (framework and the example apps), tests
 ```
 
 The CLI behind those tasks is `fu dev [root] [--port N] [--host H]`,
@@ -108,8 +108,16 @@ number is an error naming it) and `HOST` (every interface if unset or empty),
 hands the Worker the process environment as `env` and `.output/public` as
 `env.ASSETS`, and stops on SIGINT and SIGTERM, giving `waitUntil` work still
 running two seconds to finish. It uses each runtime's own server: `Deno.serve`,
-`Bun.serve`, `node:http`. For celld, see [Deploying to
-celld](#deploying-to-celld).
+`Bun.serve`, `node:http`. On Deno without `-A` it needs
+`--allow-net --allow-env --allow-read` (read access covering `.output/`). For
+celld, see [Deploying to celld](#deploying-to-celld).
+
+The build resolves packages as a Worker does (the `workerd`, `worker`, `import`
+and `default` export conditions, then `module` and `main`); `fu dev` runs in
+the dev server's own process and resolves as that runtime does (`node`, then
+`import`). A package that ships a different build for Node can therefore
+behave differently under `fu dev` than in the build: serve the build, or run
+it under celld, before trusting a new dependency.
 
 A build minifies the client, serves it from `/_fu/` under content-hashed names
 with a year-long `immutable` cache, and
@@ -195,7 +203,9 @@ export async function prepare(env: Env): Promise<void> {
 }
 
 /** Everything else is exported by the Worker as it is: handlers and classes. */
-export const scheduled = { async scheduled(event, env, ctx) {} };
+export const scheduled = {
+  async scheduled(_event: unknown, _env: Env, _ctx: unknown): Promise<void> {},
+};
 export class Room { /* a Durable Object */ }
 ```
 
@@ -547,6 +557,8 @@ Every export of an island file is an island, default or named, so one file can
 hold several. Props travel to the client as JSON: strings, numbers, arrays and
 plain objects cross; a function or JSX element (including JSX `children`) fails
 the render with an error naming the prop, rather than hydrating without it.
+The server renders the island with the props as the client will parse them, so
+a `Date` is its ISO string, `NaN` is `null` and a `Map` is `{}` on both sides.
 
 An island rendered inside another island is part of the outer one: it hydrates
 with it and gets no boundary of its own, so editing it in dev reloads the page
@@ -839,7 +851,9 @@ record of what it hydrated, so an element must be passed to it once.
 
 ```ts
 import { appHandler } from "@janit/fu/testing";
+import { assetsFromDir } from "@janit/fu/static";
 
+const pending: Promise<unknown>[] = [];
 const handler = await appHandler("/abs/path/to/app", {
   env: { API_URL: "http://api.test" }, // ctx.env; default {}
   assetStore: assetsFromDir("/abs/path/to/static"), // ctx.assets; default none
@@ -911,10 +925,7 @@ the full rationale and the undocumented traps this implementation encodes.
 deno task test
 ```
 
-`deno test` over the whole workspace, no browser needed. What only a browser
-can show (islands hydrating, hot swaps keeping state, stylesheets swapping) is
-`deno task check:browser`, which drives headless Chromium through a build and
-through the dev server while editing files under it. The framework suite is written against the
+`deno test` over the whole workspace, no browser needed. The framework suite is written against the
 failure modes this framework actually hit, so each one guards a real regression:
 
 | area | what it pins down |
@@ -961,13 +972,15 @@ escaped the chain entirely instead of rejecting.
   navigation protocol constants (`PARTIAL_PARAM`, `BUILD_PARAM`,
   `BUILD_RELOAD_HEADER`, `NAV_ATTR`, `BUILD_ATTR`), the types `Handlers`,
   `Middleware`, `PageContext`, `ResponseOverride` and `ShellProps` (the props
-  of `routes/_app.tsx`: `{ ctx, children }`), and the subpaths
-  `Env`, `AssetStore` and `RequestExtra`, and the subpaths
+  of `routes/_app.tsx`: `{ ctx, children }`), `Env`, `AssetStore` and
+  `RequestExtra`, and the subpaths
   `@janit/fu/static` (`assets`, `assetsFromDir`, `staticFiles`),
   `@janit/fu/serve` (`serveWorker`) and `@janit/fu/testing` (`appHandler`).
   The rest (`createHandler`, `compose`, the router, the `./build`, `./dev`,
-  `./render`, `./router`, `./plugins`, `./client`, `./nav` subpaths) is what
-  the drivers and tests use, and may change in any release.
+  `./render`, `./router`, `./plugins`, `./client`, `./nav`, `./errors` and
+  `./cli` subpaths) is what the drivers and tests use, and may change in any
+  release; `createHandler` is the function behind the `(request, extra)`
+  contract above, and that contract is what is supported.
 - Client navigation has been driven in Chromium only. It does not manage
   focus or announce a navigation to a screen reader, does not use view
   transitions, and remembers the scroll position of the window only, not of

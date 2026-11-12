@@ -2,6 +2,50 @@
 
 Releases before 0.5.3 are described by their commits (`git log`).
 
+## 0.6.2
+
+From the third six-lens review (correctness, security, performance,
+cross-runtime/build, tests, docs).
+
+- **A client file whose name needs percent-encoding is served.** A chunk keeps
+  its island's name, so `islands/Zähler.tsx` built to `Zähler-….js`; the
+  browser asks for `/_fu/Z%C3%A4hler-….js`, which the build's list of client
+  files, spelled raw, did not hold: a `no-store` 404, and the island never
+  hydrated. The list is now spelled as a request's pathname is.
+- **A package with only `main` or `module` builds.** The Worker is built for
+  rolldown's neutral platform, which reads no main fields: such a package
+  worked under `fu dev` and failed `fu build`. The build now falls back to
+  `module`, then `main`.
+- **An island renders on the server with the props the client hydrates
+  with.** A `Date` prop was a `Date` on the server and a string on the client,
+  so the two renders differed (or the island threw); `NaN`, `Map` and `Set`
+  likewise. The server now renders from the JSON it sends.
+- **A synchronous page or error page writes the real `ctx`.** Preact copies a
+  vnode's props, so reassigning `ctx.head` (or `ctx.data`) in a sync page was
+  lost, while the same code in an async page worked. A class component still
+  gets the copy.
+- **A route that throws at module scope no longer re-runs `prepare`** on every
+  request; it fails every request, as documented, and `prepare` ran once.
+- **`prepare` may be any expression that can be a function** (`= setup`,
+  `= wrap(init)`, `satisfies`); only a literal, object, array or class is
+  refused at build time.
+- **A taken port names the server and the port on Deno too.** Deno binds as
+  the server is built, so the runner and `fu dev` failed with a bare
+  "Address already in use".
+- **`fu dev` answers a Worker that fails with a logged `no-store` 500**, as
+  the runner does, and both share one `waitUntil`; stopping the runner also
+  waits for `waitUntil` work that `waitUntil` work started.
+- **The HMR socket admits a page on port 80 or 443**, whose Origin names no
+  port.
+- **`fu build --out <dir>` removes `server/index.mjs` and `server/serve.mjs`,
+  not `server/`**, which in `--out .` was the app's own.
+- **Client navigation announces the next page's `modulepreload`s** before
+  hydrating its islands, so their chunks' imports load in one round trip, as
+  on a first load.
+- The runner reads a file of 64 KiB or less through the handle that checked
+  it was readable: one open per client chunk instead of two.
+- `npm pack` builds without GNU `sed`.
+
 ## 0.6.1
 
 The first published 0.6. Fixes a crash in the runner that 0.6.0, tagged but

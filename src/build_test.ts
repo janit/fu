@@ -28,6 +28,8 @@ Deno.test("in a custom dir only what the build writes is cleared", async () => {
   const dir = await tree([
     "public/_fu/old-abc.js",
     "server/index.mjs",
+    "server/serve.mjs",
+    "server/db.ts", // `--out .` in a project with its own server/
     "keep.txt",
     "public/robots.txt",
   ]);
@@ -36,11 +38,13 @@ Deno.test("in a custom dir only what the build writes is cleared", async () => {
     assertEquals(
       [
         await exists(`${dir}/public/_fu`),
-        await exists(`${dir}/server`),
+        await exists(`${dir}/server/index.mjs`),
+        await exists(`${dir}/server/serve.mjs`),
+        await exists(`${dir}/server/db.ts`),
         await exists(`${dir}/keep.txt`),
         await exists(`${dir}/public/robots.txt`),
       ],
-      [false, false, true, true],
+      [false, false, false, true, true, true],
     );
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -137,7 +141,11 @@ Deno.test(
   },
 );
 
-/** Start a built server on a free port; `stop()` ends it. */
+/**
+ * Start a built server on a free port; `stop()` ends it. Ready means our child
+ * printed its address, not that something answers on the port, and a server
+ * that does not start reports what it printed.
+ */
 async function serve(root: string): Promise<{ base: string; stop(): Promise<void> }> {
   const probe = Deno.listen({ hostname: "127.0.0.1", port: 0 });
   const port = (probe.addr as Deno.NetAddr).port;
@@ -145,24 +153,34 @@ async function serve(root: string): Promise<{ base: string; stop(): Promise<void
   const child = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", `${root}/.output/server/serve.mjs`],
     env: { PORT: String(port), HOST: "127.0.0.1" },
-    stdout: "null",
-    stderr: "null",
+    stdout: "piped",
+    stderr: "piped",
   }).spawn();
   const base = `http://127.0.0.1:${port}`;
-  const stop = async () => {
-    child.kill("SIGKILL");
-    await child.status;
-  };
-  for (let i = 0; i < 100; i++) {
-    try {
-      await (await fetch(base + "/")).body?.cancel();
-      return { base, stop };
-    } catch {
-      await new Promise((r) => setTimeout(r, 100));
-    }
+  const errText = new Response(child.stderr).text();
+  const reader = child.stdout.pipeThrough(new TextDecoderStream()).getReader();
+  let out = "";
+  const deadline = setTimeout(() => reader.cancel(), 10_000);
+  while (!out.includes("[fu] serving")) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    out += value;
   }
-  await stop();
-  throw new Error("the built server did not start");
+  clearTimeout(deadline);
+  const stop = async () => {
+    await reader.cancel().catch(() => {});
+    try {
+      child.kill("SIGTERM");
+    } catch { /* already gone */ }
+    await child.status;
+    await errText;
+  };
+  if (out.includes("[fu] serving")) return { base, stop };
+  try {
+    child.kill("SIGKILL");
+  } catch { /* already gone */ }
+  await child.status;
+  throw new Error(`the built server did not start:\n${out}${await errText}`);
 }
 
 Deno.test(
@@ -444,6 +462,63 @@ Deno.test(
     try {
       const err = await assertRejects(() => build({ root }));
       assertStringIncludes(String(err), "not-installed-anywhere");
+    } finally {
+      console.log = log;
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  "a build prints the wrangler.jsonc keys celld needs, as valid JSON naming what it wrote",
+  real,
+  async () => {
+    const root = await project({ "routes/index.tsx": `export default () => <p>x</p>;\n` });
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...a: unknown[]) => lines.push(a.join(" "));
+    try {
+      await build({ root });
+    } finally {
+      console.log = log;
+      await Deno.remove(root, { recursive: true });
+    }
+    const hint = lines.find((l) => l.startsWith("[fu] for celld, in wrangler.jsonc: "));
+    const keys = JSON.parse(`{${hint!.slice("[fu] for celld, in wrangler.jsonc: ".length)}}`);
+    assertEquals(keys, {
+      main: ".output/server/index.mjs",
+      assets: { directory: ".output/public", binding: "ASSETS", run_worker_first: ["/_fu/*"] },
+    });
+  },
+);
+
+Deno.test(
+  "a real build resolves a package that has only main or module, as fu dev does",
+  real,
+  async () => {
+    // The Worker is built for the neutral platform, whose main fields are
+    // none: a package without an exports map built under fu dev and not here.
+    const pkg = (name: string, field: string, src: string) => ({
+      [`routes/node_modules/${name}/package.json`]: JSON.stringify({
+        name,
+        type: "module",
+        [field]: "./lib.js",
+      }),
+      [`routes/node_modules/${name}/lib.js`]: src,
+    });
+    const root = await project({
+      ...pkg("main-only", "main", `export const a = "from-main-only";\n`),
+      ...pkg("module-only", "module", `export const b = "from-module-only";\n`),
+      "routes/index.tsx":
+        `import { a } from "main-only";\nimport { b } from "module-only";\nexport default () => <p>{a} {b}</p>;\n`,
+    });
+    const log = console.log;
+    console.log = () => {};
+    try {
+      const { worker } = await build({ root });
+      const code = await Deno.readTextFile(worker);
+      assertStringIncludes(code, "from-main-only");
+      assertStringIncludes(code, "from-module-only");
     } finally {
       console.log = log;
       await Deno.remove(root, { recursive: true });

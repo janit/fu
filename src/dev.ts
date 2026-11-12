@@ -19,13 +19,14 @@ import {
   writeWorkerEntry,
 } from "./driver.ts";
 import { onlyHosts } from "./render.ts";
-import type { WorkerContext, WorkerModule } from "./serve.ts";
+import type { WorkerModule } from "./serve.ts";
+import type { WorkerContext } from "./lifecycle.ts";
 import { assetsFromDir } from "./static.ts";
 import type { AssetStore, Env, FuOptions } from "./types.ts";
-import { exitOnSignal, listening } from "./lifecycle.ts";
+import { exitOnSignal, listening, started, workerContext, workerFailed } from "./lifecycle.ts";
 
 // Where they always were, for whoever imported them from here.
-export { exitOnSignal, listening };
+export { exitOnSignal, listening, started };
 
 /** Set an env var on whichever runtime we are on; `Deno.env` is Deno-only. */
 function setEnv(name: string, value: string): void {
@@ -55,7 +56,9 @@ export function hmrOriginAllowed(origin: string | null, port: number, hostname: 
     return false;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  if (url.port !== String(port)) return false;
+  // URL drops a scheme's default port, so `http://localhost` is port 80.
+  const effective = url.port || (url.protocol === "https:" ? "443" : "80");
+  if (effective !== String(port)) return false;
   return LOOPBACK.has(url.hostname) || url.hostname === hostname;
 }
 
@@ -193,7 +196,11 @@ export function devFetch(
       }
       await file.body?.cancel();
     }
-    return worker().fetch(req, env, ctx);
+    try {
+      return await worker().fetch(req, env, ctx);
+    } catch (err) {
+      return workerFailed(err);
+    }
   };
 }
 
@@ -303,35 +310,44 @@ export async function dev(opts: FuOptions): Promise<void> {
       return null;
     }
   };
-  const socket = serve(
-    {
-      port: hmrPort,
-      hostname,
-      fetch: () => new Response("fu hmr"),
-      // Its handler would close this socket alone, after waiting up to five
-      // seconds for open pages to hang up; exitOnSignal stops everything.
-      gracefulShutdown: false,
-      websocket: {
-        upgrade: hmrUpgrade(port, hostname),
-        async open(peer) {
-          const id = clientIdOf(peer as never);
-          if (!id) return;
-          peers.set(id, peer as never);
-          await engine.registerClient(id);
-          (peer as never as { send(d: string): void }).send(JSON.stringify({ type: "connected" }));
-        },
-        async close(peer) {
-          const id = clientIdOf(peer as never);
-          if (!id) return;
-          peers.delete(id);
-          await engine.removeClient(id);
-        },
-      },
-    } as Parameters<typeof serve>[0],
+  const hmrWhat = "the HMR socket (it takes the port above --port)";
+  const socket = started(
+    () =>
+      serve(
+        {
+          port: hmrPort,
+          hostname,
+          fetch: () => new Response("fu hmr"),
+          // Its handler would close this socket alone, after waiting up to five
+          // seconds for open pages to hang up; exitOnSignal stops everything.
+          gracefulShutdown: false,
+          websocket: {
+            upgrade: hmrUpgrade(port, hostname),
+            async open(peer) {
+              const id = clientIdOf(peer as never);
+              if (!id) return;
+              peers.set(id, peer as never);
+              await engine.registerClient(id);
+              (peer as never as { send(d: string): void }).send(
+                JSON.stringify({ type: "connected" }),
+              );
+            },
+            async close(peer) {
+              const id = clientIdOf(peer as never);
+              if (!id) return;
+              peers.delete(id);
+              await engine.removeClient(id);
+            },
+          },
+        } as Parameters<typeof serve>[0],
+      ),
+    hmrWhat,
+    hostname,
+    hmrPort,
   );
   // `true`: open pages hold the socket, and they are not asked first.
   closers.push(() => socket.close(true));
-  await listening(socket, "the HMR socket (it takes the port above --port)", hostname, hmrPort);
+  await listening(socket, hmrWhat, hostname, hmrPort);
 
   // SSR: the Worker, as a build makes it, rebuilt on every save.
   writeSsrEntry(
@@ -381,20 +397,23 @@ export async function dev(opts: FuOptions): Promise<void> {
 
   const clientFiles = assetsFromDir(clientDir);
   const env: Env = { ...process.env, ASSETS: clientFiles };
-  const context: WorkerContext = {
-    waitUntil: (p) => void Promise.resolve(p).catch((err) => console.error("[fu] waitUntil:", err)),
-    passThroughOnException() {},
-  };
+  const { context } = workerContext();
   const answer = devFetch(clientFiles, () => worker.current, env, context);
   const guarded = ANY.has(hostname) ? answer : onlyHosts(answer, [...LOOPBACK, hostname]);
-  const server = serveHttp({
-    port,
+  const server = started(
+    () =>
+      serveHttp({
+        port,
+        hostname,
+        silent: true,
+        // exitOnSignal stops everything; srvx's own handler would stop this alone.
+        gracefulShutdown: false,
+        fetch: (req: Request) => guarded(req),
+      }),
+    "the dev server",
     hostname,
-    silent: true,
-    // exitOnSignal stops everything; srvx's own handler would stop this alone.
-    gracefulShutdown: false,
-    fetch: (req: Request) => guarded(req),
-  });
+    port,
+  );
   // By force, and not waited for beyond a moment: Deno's server finishes the
   // requests it is answering first, and has no way to be told otherwise, so
   // a slow one would hold the exit for the whole grace period. Nothing of it

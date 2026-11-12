@@ -631,6 +631,26 @@ async function runScripts(scripts: SwapPlan["scripts"]): Promise<void> {
 }
 
 /**
+ * The `modulepreload` hrefs of the next page that this one has not announced.
+ * Only regions are swapped, so the head the server built for the next page
+ * (its islands' chunks and their static imports) would otherwise never apply,
+ * and hydration would find each chunk's imports one round trip at a time.
+ */
+export function missingPreloads(live: Iterable<string>, next: Iterable<string>): string[] {
+  const have = new Set(live);
+  const out: string[] = [];
+  for (const href of next) {
+    if (!have.has(href)) {
+      have.add(href);
+      out.push(href);
+    }
+  }
+  return out;
+}
+
+const PRELOADS = 'link[rel="modulepreload"]';
+
+/**
  * Parse the fetched page and swap its regions in. Everything up to and
  * including the removal and insertion of nodes is synchronous, so two
  * navigations can never interleave their halves of a page; only hydration,
@@ -649,6 +669,19 @@ function commit(text: string, build: string, manifest: Manifest): Promise<void> 
   // browsers would load. Make them the text they are when scripting is on.
   for (const ns of next.querySelectorAll("noscript")) ns.textContent = ns.innerHTML;
   const plan = planSwap(pairs);
+  // Announced before the islands are hydrated, so their chunks' imports load
+  // alongside them. Compared resolved, as the browser fetches them.
+  const hrefs = (d: Document) =>
+    Array.from(
+      d.querySelectorAll<HTMLLinkElement>(PRELOADS),
+      (l) => new URL(l.getAttribute("href") ?? "", location.href).href,
+    );
+  for (const href of missingPreloads(hrefs(document), hrefs(next))) {
+    const link = document.createElement("link");
+    link.rel = "modulepreload";
+    link.href = href;
+    document.head.appendChild(link);
+  }
   // No list of hydrated elements is kept: render(null) unmounts an island and
   // does nothing to a marker that never got one. Each is on its own, as in
   // hydration: one that throws does not keep the others mounted.

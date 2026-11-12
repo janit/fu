@@ -150,7 +150,11 @@ export function serverInput(
     // Dev runs the module in the dev server's own process, which is Node,
     // Deno or Bun: whatever that resolves to is what it can load.
     platform: dev ? "node" : "neutral",
-    ...(dev ? {} : { resolve: { conditionNames: WORKER_CONDITIONS } }),
+    // Neutral has no main fields, so a package without an exports map would
+    // resolve under dev (node's are main and module) and not here.
+    ...(dev
+      ? {}
+      : { resolve: { conditionNames: WORKER_CONDITIONS, mainFields: ["module", "main"] } }),
     external: [/^node:/],
     treeshake: {
       moduleSideEffects: (id: string, external: boolean) => !(external && id.startsWith("node:")),
@@ -322,7 +326,15 @@ interface ExportNode {
 
 const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*$/u;
 
-const FUNCTION_EXPRESSIONS = new Set(["ArrowFunctionExpression", "FunctionExpression"]);
+// What an initialiser can be and never be callable. Anything else (a name, a
+// call, a `satisfies`) may be a function, and the Worker checks when it calls it.
+const NEVER_CALLABLE = new Set([
+  "Literal",
+  "TemplateLiteral",
+  "ObjectExpression",
+  "ArrayExpression",
+  "ClassExpression",
+]);
 
 /**
  * Read `worker.ts`'s exports. celld refuses a Worker module whose exports are
@@ -355,7 +367,7 @@ export function workerExports(file: string, source: string): WorkerExports {
         if (d.id?.type !== "Identifier" || !d.id.name) {
           fail("destructured exports are not allowed; export each binding by name");
         }
-        if (d.id!.name === "prepare" && d.init && !FUNCTION_EXPRESSIONS.has(d.init.type ?? "")) {
+        if (d.id!.name === "prepare" && d.init && NEVER_CALLABLE.has(d.init.type ?? "")) {
           fail("`prepare` must be a function");
         }
         names.push(d.id!.name!);
@@ -407,9 +419,12 @@ export function workerModule(
     ...(workerPath && exports.names.length
       ? [`export { ${exports.names.join(", ")} } from ${from};`]
       : []),
-    `let ready;`,
+    // Two promises: a failed prepare is forgotten and run again, a failed
+    // import is kept (as the runtime keeps a module that threw), so a broken
+    // route does not re-run a prepare that already succeeded.
+    `let prepared, app;`,
     `function load(env) {`,
-    `  return ready ??= Promise.resolve()`,
+    `  prepared ??= Promise.resolve()`,
     ...(exports.prepare
       ? [
         `    .then(() => {`,
@@ -418,11 +433,11 @@ export function workerModule(
         `    })`,
       ]
       : []),
-    `    .then(() => import(${JSON.stringify(ssr)}))`,
-    `    .then((m) => m.default, (err) => {`,
-    `      ready = undefined;`,
+    `    .catch((err) => {`,
+    `      prepared = undefined;`,
     `      throw err;`,
     `    });`,
+    `  return prepared.then(() => app ??= import(${JSON.stringify(ssr)}).then((m) => m.default));`,
     `}`,
     `export default {`,
     `  async fetch(request, env = {}, ctx) {`,
@@ -481,13 +496,20 @@ export function writeWorkerEntry(project: Project): string {
   return writeGenerated(project, "worker.ts", workerModule(project.workerPath, exports));
 }
 
-/** The URLs of the files under `clientDir`, as served under `prefix`. */
+/**
+ * The URLs of the files under `clientDir`, as served under `prefix`, spelled
+ * as `new URL(req.url).pathname` spells them: percent-encoded, since a chunk
+ * keeps its island's name, spaces and non-ASCII letters included.
+ */
 export function clientFileUrls(clientDir: string, prefix: string): string[] {
   return fs.readdirSync(clientDir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile())
-    .map((e) =>
-      prefix +
-      path.relative(clientDir, path.join(e.parentPath, e.name)).split(path.sep).join("/")
-    )
+    .map((e) => {
+      const rel = path.relative(clientDir, path.join(e.parentPath, e.name)).split(path.sep);
+      // The URL parser encodes as a request's pathname would; only what it
+      // would read as syntax (an escape, a query, a fragment) is escaped first.
+      const raw = rel.join("/").replace(/[%?#]/g, encodeURIComponent);
+      return new URL(prefix + raw, "http://x").pathname;
+    })
     .sort();
 }

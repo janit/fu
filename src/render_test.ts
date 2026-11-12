@@ -233,6 +233,31 @@ Deno.test("the shell wraps the page and can read state", async () => {
   assertStringIncludes(html, "{&quot;hello&quot;:&quot;world&quot;}");
 });
 
+Deno.test("a sync page writes the real ctx, as an async one does", async () => {
+  // Preact copies a vnode's props, so a sync page used to reassign a field
+  // of a copy, and the head it set never reached the document.
+  for (const sync of [true, false]) {
+    const Page = sync
+      ? (ctx: Ctx) => {
+        ctx.head = { ...ctx.head, title: "Reassigned" };
+        return h("p", null, "x");
+      }
+      : async (ctx: Ctx) => {
+        ctx.head = { ...ctx.head, title: "Reassigned" };
+        return await Promise.resolve(h("p", null, "x"));
+      };
+    const handler = createHandler({
+      manifest: { "/routes/index.tsx": () => Promise.resolve({ default: Page }) },
+      assets,
+    });
+    assertStringIncludes(
+      await (await get(handler, "/")).text(),
+      "<title>Reassigned</title>",
+      String(sync),
+    );
+  }
+});
+
 Deno.test("islands are wrapped in a hydration marker carrying their props", async () => {
   const Island = (props: { n: number }) => h("b", null, String(props.n));
   (Island as unknown as { __island: string }).__island = "/islands/X.tsx";
@@ -246,6 +271,25 @@ Deno.test("islands are wrapped in a hydration marker carrying their props", asyn
   assertStringIncludes(html, 'data-island="/islands/X.tsx"');
   assertStringIncludes(html, "&quot;n&quot;:7");
   assertStringIncludes(html, "<b>7</b>");
+});
+
+Deno.test("an island renders on the server with the props the client will hydrate with", async () => {
+  // A Date the server rendered as a Date reached the client as a string, and
+  // the island showed one thing and hydrated as another, or threw.
+  const Island = (p: { at: unknown; n: unknown; m: unknown }) =>
+    h("b", null, `${typeof p.at}|${String(p.n)}|${JSON.stringify(p.m)}`);
+  (Island as unknown as { __island: string }).__island = "/islands/D.tsx";
+  const handler = createHandler({
+    manifest: {
+      "/routes/index.tsx": () =>
+        Promise.resolve({
+          default: () => h(Island, { at: new Date(0), n: NaN, m: new Map([["k", 1]]) }),
+        }),
+    },
+    assets,
+  });
+  const html = await (await get(handler, "/")).text();
+  assertStringIncludes(html, "<b>string|null|{}</b>");
 });
 
 Deno.test("an island passed JSX children or a function fails loudly, not on hydrate", async () => {

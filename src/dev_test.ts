@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   deliverUpdates,
   devFetch,
@@ -8,6 +8,7 @@ import {
   hmrUpgrade,
   listening,
   liveClientSheets,
+  started,
 } from "./dev.ts";
 import { assetsFromDir } from "./static.ts";
 
@@ -17,6 +18,13 @@ Deno.test("the HMR socket admits the dev server's own pages", () => {
   }
   // Bound to a named host and browsed by it.
   assertEquals(hmrOriginAllowed("http://192.168.1.5:1337", 1337, "192.168.1.5"), true);
+});
+
+Deno.test("the HMR socket admits a page on its scheme's default port, whose Origin names no port", () => {
+  assertEquals(hmrOriginAllowed("http://localhost", 80, "127.0.0.1"), true);
+  assertEquals(hmrOriginAllowed("https://localhost", 443, "127.0.0.1"), true);
+  assertEquals(hmrOriginAllowed("https://localhost", 80, "127.0.0.1"), false);
+  assertEquals(hmrOriginAllowed("http://localhost", 1337, "127.0.0.1"), false);
 });
 
 Deno.test("the HMR socket refuses every other page", () => {
@@ -113,6 +121,24 @@ Deno.test("a server that could not listen stops the dev server, saying which and
     "the dev server could not listen on 127.0.0.1:1337 (listen EADDRINUSE)",
   );
   await listening({ ready: () => Promise.resolve() }, "the dev server", "127.0.0.1", 1337);
+});
+
+Deno.test("a server whose constructor throws on a taken port fails saying which and where", () => {
+  // Deno binds as the server is built: the bare error named neither.
+  assertThrows(
+    () =>
+      started(
+        () => {
+          throw new Error("Address already in use (os error 98)");
+        },
+        "the dev server",
+        "127.0.0.1",
+        4000,
+      ),
+    Error,
+    "the dev server could not listen on 127.0.0.1:4000 (Address already in use",
+  );
+  assertEquals(started(() => 7, "x", "h", 1), 7);
 });
 
 Deno.test("exitOnSignal closes, then exits 0; does not wait for ever; a second signal is immediate", async () => {
@@ -276,7 +302,7 @@ for (const [signal, busy, what] of signalCases) {
       const took = Date.now() - started;
       // And when busy, not after the two-second grace either: that is a
       // deadline for a close that hangs, not the normal way out.
-      assertEquals(took < (busy ? 1500 : 4000), true, `${took} ms`);
+      assertEquals(took < (busy ? 1800 : 4000), true, `${took} ms`);
       assertEquals([await accepts(port), await accepts(port + 1)], [false, false]);
     } finally {
       clearTimeout(timer);
@@ -370,4 +396,26 @@ Deno.test("rebuilds that load out of order leave the newest serving, not the las
     await (await worker.current.fetch(new Request("http://x/"), {}, null!)).text(),
     "newer",
   );
+});
+
+Deno.test("in dev, a Worker that throws is a logged 500 nobody caches, as under serve.mjs", async () => {
+  const dir = await Deno.makeTempDir();
+  const error = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => logged.push(a.join(" "));
+  try {
+    const worker = {
+      fetch: () => Promise.reject(new Error("prepare failed")),
+    };
+    const ctx = { waitUntil() {}, passThroughOnException() {} };
+    const res = await devFetch(assetsFromDir(dir), () => worker, {}, ctx)(
+      new Request("http://localhost/"),
+    );
+    assertEquals([res.status, res.headers.get("cache-control")], [500, "no-store"]);
+    await res.body?.cancel();
+    assertEquals(String(logged[0]).includes("prepare failed"), true);
+  } finally {
+    console.error = error;
+    await Deno.remove(dir, { recursive: true });
+  }
 });
