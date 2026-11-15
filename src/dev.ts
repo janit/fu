@@ -5,6 +5,7 @@ import { DevEngine } from "rolldown/experimental";
 import { serve } from "crossws/server";
 import { serve as serveHttp } from "srvx";
 import * as fs from "node:fs";
+import { networkInterfaces } from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -42,12 +43,19 @@ const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * Whether a page at `origin` may open the HMR socket. A browser lets any site
- * open a WebSocket to localhost, and this one streams module source on every
- * save, so only the dev server's own pages get in: its port, on a loopback
- * name or the host it was bound to. The HMR runtime dials localhost, so a page
- * on another machine never gets a working socket anyway.
+ * open a WebSocket to this machine, and this one streams module source on
+ * every save, so only the dev server's own pages get in: its port, on a
+ * loopback name or the host it was bound to. Bound to all interfaces, also on
+ * one of this machine's own addresses (`localAddresses`, IP literals as URL
+ * writes them): an IP literal cannot be rebound, unlike a name, so a page
+ * there was served by this dev server. A name still needs `--host <name>`.
  */
-export function hmrOriginAllowed(origin: string | null, port: number, hostname: string): boolean {
+export function hmrOriginAllowed(
+  origin: string | null,
+  port: number,
+  hostname: string,
+  localAddresses: readonly string[] = [],
+): boolean {
   if (!origin) return false;
   let url: URL;
   try {
@@ -59,13 +67,34 @@ export function hmrOriginAllowed(origin: string | null, port: number, hostname: 
   // URL drops a scheme's default port, so `http://localhost` is port 80.
   const effective = url.port || (url.protocol === "https:" ? "443" : "80");
   if (effective !== String(port)) return false;
-  return LOOPBACK.has(url.hostname) || url.hostname === hostname;
+  if (LOOPBACK.has(url.hostname) || url.hostname === hostname) return true;
+  return ANY.has(hostname) && localAddresses.includes(url.hostname);
+}
+
+/**
+ * This machine's interface addresses as URL hostnames: IPv4 as is, IPv6 in
+ * brackets. Link-local IPv6 with a zone (fe80::1%eth0) is left out: no
+ * Origin can carry a zone.
+ */
+export function localAddresses(): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.address.includes("%")) continue;
+      out.push(a.family === "IPv6" || String(a.family) === "6" ? `[${a.address}]` : a.address);
+    }
+  }
+  return out;
 }
 
 /** The socket's upgrade hook: a 403 for a page that may not connect, nothing otherwise. */
-export function hmrUpgrade(port: number, hostname: string): (req: Request) => Response | undefined {
+export function hmrUpgrade(
+  port: number,
+  hostname: string,
+  addresses: readonly string[] = [],
+): (req: Request) => Response | undefined {
   return (req) =>
-    hmrOriginAllowed(req.headers.get("origin"), port, hostname)
+    hmrOriginAllowed(req.headers.get("origin"), port, hostname, addresses)
       ? undefined
       : new Response("Forbidden", { status: 403 });
 }
@@ -261,11 +290,11 @@ export async function dev(opts: FuOptions): Promise<void> {
   const cssHref = () => `/style.css?v=${++cssVersion}`;
 
   // `implement` takes the runtime SOURCE, not a path — a path gets inlined
-  // literally and parsed as a regex. `$ADDR` is only substituted in rolldown's
-  // own default runtime, so do it here.
+  // literally and parsed as a regex. The runtime dials the host its page came
+  // from, so only the port is filled in here.
   const hmrRuntime = fs.readFileSync(runtime.hmr, "utf8").replaceAll(
-    "$ADDR",
-    `localhost:${hmrPort}`,
+    "__FU_HMR_PORT__",
+    String(hmrPort),
   );
 
   const engine = await DevEngine.create(
@@ -322,7 +351,7 @@ export async function dev(opts: FuOptions): Promise<void> {
           // seconds for open pages to hang up; exitOnSignal stops everything.
           gracefulShutdown: false,
           websocket: {
-            upgrade: hmrUpgrade(port, hostname),
+            upgrade: hmrUpgrade(port, hostname, ANY.has(hostname) ? localAddresses() : []),
             async open(peer) {
               const id = clientIdOf(peer as never);
               if (!id) return;

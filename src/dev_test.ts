@@ -34,7 +34,7 @@ Deno.test("the HMR socket refuses every other page", () => {
     "http://attacker.example:1337", // DNS rebinding keeps the port
     "http://localhost:8080", // another app on this machine
     "http://localhost:1338", // the HMR port itself is not a page
-    "http://192.168.1.5:1337", // a LAN host when bound to all interfaces
+    "http://192.168.1.5:1337", // a LAN address that is not this machine's
     "null",
     "file://",
     "chrome-extension://abc",
@@ -43,6 +43,20 @@ Deno.test("the HMR socket refuses every other page", () => {
   for (const origin of refused) {
     assertEquals(hmrOriginAllowed(origin, 1337, "0.0.0.0"), false, String(origin));
   }
+});
+
+Deno.test("bound to all interfaces, the HMR socket admits a page on one of this machine's own addresses", () => {
+  const mine = ["192.168.42.144", "100.73.167.94", "[fd7a:115c:a1e0::1]"];
+  for (const host of mine) {
+    assertEquals(hmrOriginAllowed(`http://${host}:1337`, 1337, "0.0.0.0", mine), true, host);
+    assertEquals(hmrOriginAllowed(`http://${host}:1337`, 1337, "::", mine), true, host);
+  }
+  // Another machine's address, the wrong port, or a name (a name can be rebound).
+  assertEquals(hmrOriginAllowed("http://192.168.42.7:1337", 1337, "0.0.0.0", mine), false);
+  assertEquals(hmrOriginAllowed("http://192.168.42.144:8080", 1337, "0.0.0.0", mine), false);
+  assertEquals(hmrOriginAllowed("http://devbox.local:1337", 1337, "0.0.0.0", mine), false);
+  // Bound to one address, the others are not admitted.
+  assertEquals(hmrOriginAllowed("http://100.73.167.94:1337", 1337, "192.168.42.144", mine), false);
 });
 
 Deno.test("the socket's upgrade hook is where a stranger is turned away", () => {

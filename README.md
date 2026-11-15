@@ -81,7 +81,10 @@ which serves a build on the runtime running it. The root defaults to the working
 port after it. It binds to `127.0.0.1` and answers only to loopback names
 (`localhost`, `127.0.0.1`, any `*.localhost`), because it hands out source and
 stack traces. `--host 0.0.0.0` opens it to the network, for a container or
-another device; `--host <name>` binds and admits that one name. `fu --help` and
+another device, and HMR works from any of the machine's own addresses (a LAN
+or Tailscale IP); `--host <name>` binds and admits that one name. The page's
+HMR client dials the host the page came from, and works on plain http by IP,
+where the browser has no `crypto.randomUUID`. `fu --help` and
 `fu --version` do what they say. `fu dev` stops on SIGINT (Ctrl+C) and on
 SIGTERM: it closes the HMR socket, the dev server and the watchers, and exits
 with code 0, within two seconds at the latest.
@@ -458,7 +461,11 @@ different origin:
 
 ```ts
 const dev = ctx.env.FU_DEV === "1"; // inside a middleware; ctx.env on every runtime
-const connectSrc = dev ? "connect-src 'self' ws://localhost:*" : "connect-src 'self'";
+// The HMR client dials the host the page came from, so name that host. Check
+// it first: URL keeps ";" in a host name, which would open a new directive.
+const host = ctx.url.hostname;
+const named = /^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)$/i.test(host) ? host : "localhost";
+const connectSrc = dev ? `connect-src 'self' ws://${named}:* wss://${named}:*` : "connect-src 'self'";
 ```
 
 ## Errors
@@ -871,6 +878,82 @@ loader for `.tsx`), and islands render as plain components without their
 build. The modules go through the runtime's module cache, so two handlers for
 one app share its module-level state.
 
+## Using Effect
+
+fu has no Effect integration and needs none: a handler returns a `Promise`,
+and Effect runs to one. Build the runtime once per isolate, in `prepare`,
+where `env` is at hand; app modules run after `prepare`, so they can import
+it:
+
+```ts
+// lib/runtime.ts
+import { Context, Effect, Layer, ManagedRuntime } from "effect";
+import type { Env } from "@janit/fu";
+
+export class Greeter extends Context.Service<Greeter, {
+  readonly greet: (name: string) => Effect.Effect<string>;
+}>()("app/Greeter") {}
+
+const make = (env: Env) =>
+  ManagedRuntime.make(Layer.succeed(Greeter, Greeter.of({
+    greet: (name) => Effect.succeed(`${env.GREETING ?? "Hello"}, ${name}`),
+  })));
+
+export let runtime: ReturnType<typeof make>;
+export function initRuntime(env: Env): void {
+  runtime = make(env);
+}
+
+// worker.ts
+import type { Env } from "@janit/fu";
+import { initRuntime } from "./lib/runtime.ts";
+
+export function prepare(env: Env): void {
+  initRuntime(env);
+}
+
+// routes/index.tsx
+import { Effect } from "effect";
+import type { PageContext } from "@janit/fu";
+import { Greeter, runtime } from "../lib/runtime.ts";
+
+export const handlers = {
+  GET: (ctx: PageContext) =>
+    runtime.runPromise(Effect.gen(function* () {
+      const greeter = yield* Greeter;
+      return { greeting: yield* greeter.greet("world") };
+    })),
+};
+
+export default function Home(ctx: PageContext) {
+  return <h1>{(ctx.data as { greeting: string }).greeting}</h1>;
+}
+```
+
+- **Errors.** `runPromise` rejects with the failure itself, so the
+  framework's [error handling](#errors) applies: failing with `HttpError`, or
+  with a tagged error carrying a `status` field, renders that status. Turn an
+  expected failure into a `Response` inside the Effect (`Effect.catchTag`)
+  when the route answers with something other than the error page. A defect
+  is a 500.
+- **Work after the response** goes through `ctx.waitUntil(runtime.runPromise(...))`,
+  as any other promise would; a fiber forked and left running is not waited
+  for.
+- **Finalizers do not run when the server stops.** fu has no shutdown hook,
+  and celld stops an isolate without one, so a scoped layer is acquired and
+  never released. Do not rely on a release for correctness. Under `fu dev`
+  each save runs `prepare` again and builds a fresh runtime, leaving the old
+  one undisposed (see [`worker.ts`](#workerts)).
+- **Size.** Measured with `effect` 4.1.2, minified: a few services and
+  `Effect.gen` added 135 KB to the Worker (43 KB gzipped). An island that
+  imports Effect carries about 38 KB more (12 KB gzipped); keep Effect on the
+  server unless an island needs it.
+
+Effect 4.1.2 runs under the runner on Deno, Node and Bun, under `fu dev`, and
+under celld bundled and with `no_bundle`, islands included. Effect's own code
+looks for `node:async_hooks` through `process.getBuiltinModule` and does
+without it where there is none.
+
 ## What works
 
 Routing (static, dynamic and wildcard, on the raw segments of the path),
@@ -1009,6 +1092,9 @@ escaped the chain entirely instead of rejecting.
 - No per-directory `_middleware.ts`. Middleware is registered programmatically
   in `app.ts`; scope it with a path check. (Measured against a real app: nested
   middleware had zero uses across 43 middleware.)
+- No shutdown hook: nothing tells the app the server is stopping, so what
+  `prepare` opened (a connection pool, an Effect runtime's scoped layers) is
+  never closed by the app. The runner waits for `waitUntil` work, then exits.
 - Deliberately absent: streaming SSR, nested layouts, wrappers for Durable
   Objects, KV, queues and cron (they are celld's, reached through `ctx.env`
   and `worker.ts`).

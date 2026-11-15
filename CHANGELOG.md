@@ -2,6 +2,30 @@
 
 Releases before 0.5.3 are described by their commits (`git log`).
 
+## 0.6.3
+
+- **README: Using Effect.** How to run Effect in an app: a runtime built in
+  `prepare`, how failures map to responses, `waitUntil`, and the measured
+  size. A spike with `effect` 4.1.2 ran under the runner on Deno, Node and
+  Bun, under `fu dev`, and under celld bundled and not, islands hydrating. No
+  code changed. Known gaps now name the missing shutdown hook.
+- **A dev page opened over plain http by IP works.** On a LAN or Tailscale
+  address the page is not a secure context and has no
+  `crypto.randomUUID`; the HMR client called it at load, threw before any
+  island hydrated, and left the whole page dead. It now falls back to
+  `crypto.getRandomValues`.
+- **HMR works from another device.** The client dialled `localhost`, which on
+  another device is that device. It now dials the host the page came from
+  (`wss` on an https page), and, bound to all interfaces, the socket admits a
+  page on one of the machine's own IP addresses. Names are still admitted only
+  when bound with `--host <name>`: a name can be rebound, an IP literal cannot.
+  An app whose dev CSP names `ws://localhost:*` must name the page's host
+  instead (README, "Middleware").
+
+## 0.6.2
+
+From the third six-lens review (correctness, security, performance,
+
 ## 0.6.2
 
 From the third six-lens review (correctness, security, performance,

@@ -335,7 +335,14 @@ The HMR socket streams module source on every save, and a browser lets any
 site open a WebSocket to localhost — no CORS applies to the handshake. So it
 checks `Origin`: only a page on the dev port, under a loopback name or the
 bound `--host`, gets a socket; everything else, including DNS rebinding (which
-keeps the port but not the name) and a missing `Origin`, gets a 403. It binds
+keeps the port but not the name) and a missing `Origin`, gets a 403. Bound to
+all interfaces, a page on one of the machine's own IP addresses gets in too:
+an IP literal cannot be rebound, so such a page was served by this dev
+server, while another machine's address or any name is still refused. The
+client dials the host its page came from (`location.hostname`, `wss` on
+https), not `localhost`, so a browser on another device reaches the socket;
+and it names itself with `crypto.getRandomValues` where `crypto.randomUUID`
+is missing, as it is on plain http by IP, outside a secure context. It binds
 the same host as the dev server, which is `127.0.0.1` unless `--host` says
 otherwise: the dev server hands out source and stack traces, so being
 reachable from the network is opt-in. On the app port the dev server

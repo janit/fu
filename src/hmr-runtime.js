@@ -46,8 +46,29 @@ class FuDevRuntime extends BaseDevRuntime {
   }
 }
 
-const clientId = crypto.randomUUID();
-const addr = new URL("ws://$ADDR");
+/**
+ * A random v4 UUID naming this page to the HMR socket. crypto.randomUUID
+ * exists only in a secure context (https, localhost); a dev server opened over
+ * plain http by IP or host name has none, and a throw here, before any
+ * island, leaves the whole page dead. getRandomValues exists everywhere.
+ * @returns {string}
+ */
+function newClientId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+const clientId = newClientId();
+// The host the page came from (localhost, or the address a LAN or Tailscale
+// browser used), on the HMR port. wss on an https page, which would refuse a
+// plain ws: socket as mixed content.
+const addr = new URL(
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:__FU_HMR_PORT__`,
+);
 addr.searchParams.set("clientId", clientId);
 const socket = new WebSocket(addr);
 
